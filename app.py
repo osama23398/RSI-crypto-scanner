@@ -77,7 +77,7 @@ STORE_MAXLEN = 100
 WORKERS = 8
 REFRESH_SECS = 60
 
-# ---------- Crypto exclusion sets (stocks, fiat, stables) ----------
+# ---------- Exclusion sets ----------
 EXCLUDE_STOCKS = {
     "NVDA", "GOOG", "GOOGL", "AAPL", "TSLA", "MSFT", "AMZN", "META",
     "NFLX", "SPY", "QQQ", "ARKK", "GLD", "SLV", "JPM", "V", "MA",
@@ -119,7 +119,7 @@ def wilder_rsi(closes, period=RSI_PERIOD):
     return 100.0 - (100.0 / (1.0 + rs))
 
 # ============================================================
-# VOLUME CALC (handles None quoteVolume, contract size)
+# VOLUME CALC (handles None quoteVolume)
 # ============================================================
 def calc_volume_usdt(ticker, market):
     qv = ticker.get("quoteVolume")
@@ -138,41 +138,25 @@ def calc_volume_usdt(ticker, market):
         last_price = float(ticker.get("last") or 0)
     except (TypeError, ValueError):
         last_price = 0.0
-    try:
-        contract_size = float(market.get("contractSize") or 1)
-    except (TypeError, ValueError):
-        contract_size = 1.0
-    return base_vol * last_price * contract_size
+    return base_vol * last_price
 
 # ============================================================
-# EXCHANGE — Binance USDT-M Perpetual → Bybit USDT Perpetual
+# EXCHANGE (Kraken → Coinbase fallback)
 # ============================================================
 @st.cache_resource
 def get_exchange():
-    # Binance USDⓈ-M perpetuals
-    try:
-        ex = ccxt.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"},
-        })
-        ex.load_markets()
-        if ex.markets:
-            return ex, "binance"
-    except Exception:
-        pass
-
-    # Bybit USDT perpetuals
-    try:
-        ex = ccxt.bybit({
-            "enableRateLimit": True,
-            "options": {"defaultType": "swap"},
-        })
-        ex.load_markets()
-        if ex.markets:
-            return ex, "bybit"
-    except Exception:
-        pass
-
+    for ex_id in ["kraken", "coinbase"]:
+        try:
+            ex_class = getattr(ccxt, ex_id)
+            ex = ex_class({
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+            })
+            ex.load_markets()
+            if ex.markets:
+                return ex, ex_id
+        except Exception:
+            continue
     return None, None
 
 # ============================================================
@@ -287,7 +271,7 @@ def refresh_all(ex, pairs, store):
                 pass
 
 # ============================================================
-# PAIR DISCOVERY (crypto-only perpetuals, top 180 liquid)
+# PAIR DISCOVERY (crypto-only, top 180 liquid)
 # ============================================================
 def _discover_pairs_impl(ex, cg_symbols, min_vol):
     if ex is None:
@@ -300,12 +284,9 @@ def _discover_pairs_impl(ex, cg_symbols, min_vol):
     for sym, mkt in ex.markets.items():
         if not mkt.get("active"):
             continue
-        # Keep only linear USDT-margined perpetual swaps
-        if not mkt.get("swap"):
+        if not mkt.get("spot"):
             continue
-        if not mkt.get("linear"):
-            continue
-        if mkt.get("quote") != "USDT":
+        if mkt.get("quote") not in ("USD", "USDT"):
             continue
         base = (mkt.get("base") or "").upper()
         if not is_crypto(base, cg_symbols):
@@ -318,7 +299,7 @@ def _discover_pairs_impl(ex, cg_symbols, min_vol):
             candidates.append({
                 "symbol": sym,
                 "base": base,
-                "quote": "USDT",
+                "quote": mkt.get("quote"),
                 "volume": vol,
             })
     candidates.sort(key=lambda x: x["volume"], reverse=True)
@@ -462,14 +443,14 @@ def get_majors_ticker():
         return {}
     out = {}
     for base in ["BTC", "ETH"]:
-        # On Binance futures / Bybit swap the symbol is BASE/USDT:USDT
-        sym = f"{base}/USDT:USDT"
-        try:
-            if sym in ex.markets:
-                t = ex.fetch_ticker(sym)
-                out[base] = t.get("percentage")
-        except Exception:
-            continue
+        for sym in [f"{base}/USD", f"{base}/USDT"]:
+            try:
+                if sym in ex.markets:
+                    t = ex.fetch_ticker(sym)
+                    out[base] = t.get("percentage")
+                    break
+            except Exception:
+                continue
     return out
 
 # ============================================================
@@ -492,7 +473,7 @@ ex_ui, ex_id_ui = get_exchange()
 
 with st.sidebar:
     st.title("🔍 RSI Scanner")
-    st.caption(f"Exchange: {(ex_id_ui or 'N/A').upper()} Perpetuals")
+    st.caption(f"Exchange: {(ex_id_ui or 'N/A').upper()}")
     if st.button("🔄 Refresh Scan Now", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -521,7 +502,7 @@ with st.sidebar:
     )
 
 if ex_ui is None:
-    st.error("❌ Could not connect to Binance Futures or Bybit Perpetuals. Click Refresh.")
+    st.error("❌ Could not connect to Kraken or Coinbase. Click Refresh.")
     st.stop()
 
 # ============================================================
@@ -534,7 +515,7 @@ def auto_scanner():
     cg_symbols, cg_ranks = fetch_coingecko_set()
     store = get_candle_store()
 
-    # ---- Volume control ----
+    # ---- Volume control (part of scan cache key) ----
     vol_label = st.selectbox(
         "Min 24h Vol",
         list(VOL_OPTIONS.keys()),
@@ -543,7 +524,7 @@ def auto_scanner():
     )
     min_vol = VOL_OPTIONS[vol_label]
 
-    # ---- Discover crypto perpetual pairs ----
+    # ---- Discover crypto pairs ----
     pairs = discover_pairs_cached(ex_id, min_vol)
 
     # ---- Decide refresh: 60s tick OR pair set changed ----
@@ -556,7 +537,7 @@ def auto_scanner():
 
     if symbols_changed or time_elapsed or is_first_load:
         label = "Initial load" if is_first_load else "Delta refresh"
-        with st.spinner(f"{label}: {len(pairs)} perpetual pairs..."):
+        with st.spinner(f"{label}: {len(pairs)} crypto pairs..."):
             refresh_all(ex, pairs, store)
         st.session_state["_last_pair_symbols"] = pair_symbols
         st.session_state["_last_refresh_ts"] = time.time()
@@ -735,22 +716,17 @@ def auto_scanner():
         key="csv_dl",
     )
 
-    # ---- TradingView chart (USDT perpetual) ----
+    # ---- TradingView chart ----
     st.markdown("---")
-    st.subheader("📈 TradingView Chart (USDT Perpetual)")
+    st.subheader("📈 TradingView Chart")
 
     df["_base_quote"] = df["base"] + "|" + df["quote"]
     options = sorted(df["_base_quote"].unique())
     sel = st.selectbox("Select coin", options, key="chart_sel")
     if sel:
         b, q = sel.split("|")
-        # Binance USDT-M perpetual  →  BINANCE:BTCUSDT.P
-        # Bybit USDT perpetual      →  BYBIT:BTCUSDT.P
-        if ex_id == "binance":
-            tv_symbol = f"BINANCE:{b}{q}.P"
-        else:
-            tv_symbol = f"BYBIT:{b}{q}.P"
-
+        exch_prefix = "KRAKEN" if ex_id == "kraken" else "COINBASE"
+        tv_symbol = f"{exch_prefix}:{b}{q}"
         tv_html = f"""
         <div id="tv_chart" style="height:520px"></div>
         <script src="https://s3.tradingview.com/tv.js"></script>
