@@ -7,9 +7,6 @@ import time
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ============================================================
-# PAGE CONFIG & DARK THEME CSS
-# ============================================================
 st.set_page_config(layout="wide", page_title="RSI Oversold Scanner", page_icon="🔍")
 
 st.markdown("""
@@ -49,9 +46,6 @@ VOL_MAP = {
     "$50M": 50_000_000,
 }
 
-# ============================================================
-# WILDER'S RSI CALCULATION (Matches TradingView Exactly)
-# ============================================================
 def compute_wilder_rsi(closes: np.ndarray, period: int = 14):
     if closes is None or len(closes) < period + 2:
         return None
@@ -71,14 +65,11 @@ def compute_wilder_rsi(closes: np.ndarray, period: int = 14):
     rs = avg_gain / avg_loss
     return float(100.0 - (100.0 / (1.0 + rs)))
 
-# ============================================================
-# COINGECKO MARKET CAP RANK (Cached 1 Hour)
-# ============================================================
 @st.cache_data(ttl=3600)
 def fetch_coingecko_ranks():
     ranks = {}
     try:
-        for page in [1, 2, 3, 4]:
+        for page in:
             resp = requests.get(
                 "https://coingecko.com",
                 params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": 250, "page": page},
@@ -95,9 +86,6 @@ def fetch_coingecko_ranks():
         pass
     return ranks
 
-# ============================================================
-# CLOUD-SAFE PERPETUAL EXCHANGE LOADER (OKX -> KuCoin -> Kraken)
-# ============================================================
 def create_exchange(exchange_id: str):
     if exchange_id == "okx":
         return ccxt.okx({"options": {"defaultType": "swap"}, "enableRateLimit": True})
@@ -108,7 +96,6 @@ def create_exchange(exchange_id: str):
 
 @st.cache_data(ttl=300)
 def get_active_perpetual_markets():
-    """Find working perpetual exchange on US cloud servers and return all USDT/USD swaps."""
     for ex_id in ["okx", "kucoinfutures", "krakenfutures"]:
         try:
             ex = create_exchange(ex_id)
@@ -145,11 +132,7 @@ def get_active_perpetual_markets():
             continue
     return None, []
 
-# ============================================================
-# TIMESTAMP-ALIGNED 45m CANDLE RESAMPLER
-# ============================================================
 def resample_to_45m(ohlcv_15m: list):
-    """Properly group 15m candles into 45m candles aligned to UTC clock."""
     if not ohlcv_15m or len(ohlcv_15m) < 45:
         return None
     df = pd.DataFrame(ohlcv_15m, columns=["ts", "open", "high", "low", "close", "vol"])
@@ -165,9 +148,6 @@ def resample_to_45m(ohlcv_15m: list):
     }).dropna()
     return resampled[["ts", "open", "high", "low", "close", "vol"]].values.tolist()
 
-# ============================================================
-# SCAN SINGLE PAIR ACROSS ALL 7 TIMEFRAMES
-# ============================================================
 def scan_single_pair(pair_info: dict, cg_ranks: dict):
     ex = create_exchange(pair_info["exchange"])
     symbol = pair_info["symbol"]
@@ -207,7 +187,6 @@ def scan_single_pair(pair_info: dict, cg_ranks: dict):
         except Exception:
             continue
 
-    # Find all timeframes where closed RSI < 30 OR live RSI < 30
     oversold_closed_tfs = [tf for tf, d in tf_data.items() if d["closed_rsi"] < 30]
     tf_count = len(oversold_closed_tfs)
     tf_list_str = " · ".join(oversold_closed_tfs)
@@ -243,9 +222,6 @@ def scan_single_pair(pair_info: dict, cg_ranks: dict):
 
     return results
 
-# ============================================================
-# MAIN SCAN ORCHESTRATOR
-# ============================================================
 @st.cache_data(ttl=180, show_spinner=False)
 def run_full_scan(min_vol_usd: float):
     start_time = time.time()
@@ -255,10 +231,8 @@ def run_full_scan(min_vol_usd: float):
     if not all_pairs:
         return pd.DataFrame(), 0, time.time() - start_time, "None"
 
-    # Filter by selected minimum 24h volume & sort highest volume first
     filtered_pairs = [p for p in all_pairs if p["volume"] >= min_vol_usd]
     filtered_pairs.sort(key=lambda x: x["volume"], reverse=True)
-    # Cap at top 180 liquid pairs so cloud scan finishes in ~15-25s reliably
     filtered_pairs = filtered_pairs[:180]
 
     all_results = []
@@ -270,57 +244,54 @@ def run_full_scan(min_vol_usd: float):
                 if res:
                     all_results.extend(res)
             except Exception:
-pass
-elapsed = time.time() - start_time
-df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
-return df, len(filtered_pairs), elapsed, ex_id.upper()
+                pass
 
-============================================================
+    elapsed = time.time() - start_time
+    df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
+    return df, len(filtered_pairs), elapsed, ex_id.upper()
 
-
-SIDEBAR
-
-
-============================================================
-
+# ============================================================
+# SIDEBAR
+# ============================================================
 with st.sidebar:
-st.title("🔍 RSI Scanner")
-st.caption("USDT Perpetuals · CoinGecko Ranks")
-if st.button("🔄 Refresh Scan Now", use_container_width=True):
-st.cache_data.clear()
-st.rerun()
-st.subheader("Live Majors")
-try:
-ex_ticker = create_exchange("okx")
-for label, pair in [("BTC", "BTC/USDT:USDT"), ("ETH", "ETH/USDT:USDT")]:
-try:
-t = ex_ticker.fetch_ticker(pair)
-pct = float(t.get("percentage") or 0)
-cls = "ticker-up" if pct >= 0 else "ticker-down"
-st.markdown(
-f"{label} {pct:+.2f}%",
-unsafe_allow_html=True,
-)
-except Exception:
-st.caption(f"{label}: --")
-except Exception:
-st.caption("Majors ticker unavailable")
-st.divider()
-watchlist = st.multiselect(
-"⭐ Filter by Watchlist",
-options=["BTC", "ETH", "SOL", "UNI", "AAVE", "ARB", "LINK", "SUI", "AVAX", "DOGE"],
-default=[],
-)
+    st.title("🔍 RSI Scanner")
+    st.caption("USDT Perpetuals · CoinGecko Ranks")
+
+    if st.button("🔄 Refresh Scan Now", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.subheader("Live Majors")
+    try:
+        ex_ticker = create_exchange("okx")
+        for label, pair in [("BTC", "BTC/USDT:USDT"), ("ETH", "ETH/USDT:USDT")]:
+            try:
+                t = ex_ticker.fetch_ticker(pair)
+                pct = float(t.get("percentage") or 0)
+                cls = "ticker-up" if pct >= 0 else "ticker-down"
+                st.markdown(
+                    f"<span style='color:#8b949e'>{label}</span> "
+                    f"<span class='{cls}'>{pct:+.2f}%</span>",
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                st.caption(f"{label}: --")
+    except Exception:
+        st.caption("Majors ticker unavailable")
+
+    st.divider()
+    watchlist = st.multiselect(
+        "⭐ Filter by Watchlist",
+        options=["BTC", "ETH", "SOL", "UNI", "AAVE", "ARB", "LINK", "SUI", "AVAX", "DOGE"],
+        default=[],
+    )
+
+# ============================================================
+# FILTER BAR
 
 ============================================================
 
-
-FILTER BAR (Placed before scan so Min Vol controls the scan!)
-
-
-============================================================
-
-filter_cols = st.columns([1.8, 1.1, 1.2, 2.2, 1.5, 1.2, 1.0])
+filter_cols = st.columns([1.8, 1, 1.1, 2, 1.5, 1.2, 0.9])
 with filter_cols[0]:
 search = st.text_input("Search Symbol", placeholder="e.g. UNI, AAVE")
 with filter_cols[1]:
@@ -359,7 +330,6 @@ APPLY FILTERS
 
 df = df_raw.copy() if not df_raw.empty else pd.DataFrame()
 if not df.empty:
-# Closed vs Live RSI filter
 if not live_preview:
 df = df[df["rsi_closed"] < 30]
 else:
