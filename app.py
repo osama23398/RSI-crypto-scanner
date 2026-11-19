@@ -78,7 +78,7 @@ def compute_wilder_rsi(closes: np.ndarray, period: int = 14):
 def fetch_coingecko_ranks():
     ranks = {}
     try:
-        for page in:
+        for page in [1, 2, 3, 4]:
             resp = requests.get(
                 "https://coingecko.com",
                 params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": 250, "page": page},
