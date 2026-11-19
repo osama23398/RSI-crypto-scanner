@@ -84,7 +84,7 @@ def wilder_rsi(closes, period=14):
 # ============================================================
 @st.cache_resource
 def get_exchange():
-    for ex_id in ["okx", "kucoinfutures", "bybit"]:
+    for ex_id in ["kucoinfutures", "okx", "bybit"]:
         try:
             ex_class = getattr(ccxt, ex_id)
             opts = {"defaultType": "swap"}
