@@ -288,20 +288,28 @@ def run_full_scan(min_vol_value):
     except Exception:
         return pd.DataFrame(), 0, 0, round(time.time() - start, 1)
 
-    liquid = []
+      liquid = []
     for sym, mkt in ex.markets.items():
         if not mkt.get("swap") or not mkt.get("active"):
             continue
         if mkt.get("quote") != "USDT":
             continue
         t = tickers.get(sym) or {}
-        vol = t.get("quoteVolume") or 0
-        if vol >= min_vol_value:
+        vol = t.get("quoteVolume")
+        if not vol:
+            base_vol = float(t.get("baseVolume") or 0)
+            last_px = float(t.get("last") or 0)
+            contract_sz = float(mkt.get("contractSize") or 1)
+            vol = base_vol * last_px * contract_sz
+        if float(vol or 0) >= min_vol_value:
             liquid.append({
                 "symbol": sym,
                 "base": mkt.get("base", ""),
-                "volume": vol,
+                "volume": float(vol),
             })
+
+    liquid.sort(key=lambda x: x["volume"], reverse=True)
+    liquid = liquid[:150]
 
     if not liquid:
         return pd.DataFrame(), 0, 0, round(time.time() - start, 1)
