@@ -5,6 +5,7 @@ import numpy as np
 import requests
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit.components.v1 as components
@@ -45,13 +46,9 @@ div[data-testid="stSidebar"] { background-color: #161b22; }
 TF_LABELS = ["5m", "15m", "30m", "45m", "1H", "2H", "4H"]
 
 TF_CCXT = {
-    "5m": "5m",
-    "15m": "15m",
-    "30m": "30m",
-    "45m": None,   # resampled from 15m
-    "1H": "1h",
-    "2H": "2h",
-    "4H": "4h",
+    "5m": "5m", "15m": "15m", "30m": "30m",
+    "45m": None,  # synthetic resample from 15m
+    "1H": "1h", "2H": "2h", "4H": "4h",
 }
 
 TF_MS = {
@@ -72,14 +69,37 @@ VOL_OPTIONS = {
     "$25M": 25_000_000,
 }
 
-TOP_N_PAIRS = 200
-LOOKBACK = 100
+TOP_N_PAIRS = 180
+INITIAL_LIMIT = 100
+DELTA_LIMIT = 3
 RSI_PERIOD = 14
+STORE_MAXLEN = 100
+WORKERS = 8
+REFRESH_SECS = 60
+
+# ---------- Exclusion sets ----------
+EXCLUDE_STOCKS = {
+    "NVDA", "GOOG", "GOOGL", "AAPL", "TSLA", "MSFT", "AMZN", "META",
+    "NFLX", "SPY", "QQQ", "ARKK", "GLD", "SLV", "JPM", "V", "MA",
+    "KO", "PEP", "DIS", "BA", "INTC", "AMD", "PYPL", "SNAP", "BRK",
+    "COIN", "MSTR", "HOOD", "PLTR", "RIOT", "MARA",
+}
+EXCLUDE_FIAT = {
+    "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "CNY", "HKD",
+    "SGD", "NZD", "SEK", "NOK", "DKK", "PLN", "ZAR", "MXN",
+    "BRL", "INR", "KRW", "RUB", "TRY", "ILS",
+}
+EXCLUDE_STABLES = {
+    "USDT", "USDC", "DAI", "TUSD", "BUSD", "FRAX", "USDD",
+    "USDP", "GUSD", "UST", "USTC", "PYUSD", "FDUSD",
+    "PAXG", "XAUT",
+}
+MEME_PREFIXES = ["1000000", "100000", "10000", "1000", "100", "1M"]
 
 _fetch_lock = threading.Lock()
 
 # ============================================================
-# WILDER'S RSI(14) — pure numpy
+# WILDER RSI(14) — pure numpy
 # ============================================================
 def wilder_rsi(closes, period=RSI_PERIOD):
     arr = np.asarray(closes, dtype=float)
@@ -99,16 +119,38 @@ def wilder_rsi(closes, period=RSI_PERIOD):
     return 100.0 - (100.0 / (1.0 + rs))
 
 # ============================================================
-# EXCHANGE (OKX primary → KuCoin Futures → Bybit fallback)
+# VOLUME CALC (handles None quoteVolume)
+# ============================================================
+def calc_volume_usdt(ticker, market):
+    qv = ticker.get("quoteVolume")
+    if qv:
+        try:
+            f = float(qv)
+            if f > 0:
+                return f
+        except (TypeError, ValueError):
+            pass
+    try:
+        base_vol = float(ticker.get("baseVolume") or 0)
+    except (TypeError, ValueError):
+        base_vol = 0.0
+    try:
+        last_price = float(ticker.get("last") or 0)
+    except (TypeError, ValueError):
+        last_price = 0.0
+    return base_vol * last_price
+
+# ============================================================
+# EXCHANGE (Kraken → Coinbase fallback)
 # ============================================================
 @st.cache_resource
 def get_exchange():
-    for ex_id in ["okx", "kucoinfutures", "bybit"]:
+    for ex_id in ["kraken", "coinbase"]:
         try:
             ex_class = getattr(ccxt, ex_id)
             ex = ex_class({
                 "enableRateLimit": True,
-                "options": {"defaultType": "swap"},
+                "options": {"defaultType": "spot"},
             })
             ex.load_markets()
             if ex.markets:
@@ -118,13 +160,14 @@ def get_exchange():
     return None, None
 
 # ============================================================
-# COINGECKO TOP-1000 MARKET CAP RANKS (cached 1h)
+# COINGECKO top-1500 (verified crypto symbols + ranks)
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_coingecko_ranks():
+def fetch_coingecko_set():
+    symbols = set()
     ranks = {}
     try:
-        for page in range(1, 5):
+        for page in range(1, 7):
             r = requests.get(
                 "https://api.coingecko.com/api/v3/coins/markets",
                 params={
@@ -139,214 +182,259 @@ def fetch_coingecko_ranks():
                 break
             for i, coin in enumerate(r.json()):
                 sym = (coin.get("symbol") or "").upper()
-                if sym and sym not in ranks:
-                    ranks[sym] = (page - 1) * 250 + i + 1
-            time.sleep(0.35)
+                if sym:
+                    symbols.add(sym)
+                    if sym not in ranks:
+                        ranks[sym] = (page - 1) * 250 + i + 1
+            time.sleep(0.3)
     except Exception:
         pass
-    return ranks
+    return symbols, ranks
 
 # ============================================================
-# VOLUME CALCULATION — handles OKX / KuCoin None quoteVolume
+# CRYPTO-ONLY FILTER
 # ============================================================
-def calc_volume_usdt(ticker, market):
-    qv = ticker.get("quoteVolume")
-    if qv:
-        try:
-            f = float(qv)
-            if f > 0:
-                return f
-        except (TypeError, ValueError):
-            pass
+def normalize_base(base):
+    b = (base or "").upper()
+    for p in MEME_PREFIXES:
+        if b.startswith(p) and len(b) > len(p) + 1:
+            return b[len(p):]
+    return b
 
-    try:
-        base_vol = float(ticker.get("baseVolume") or 0)
-    except (TypeError, ValueError):
-        base_vol = 0.0
-    try:
-        last_price = float(ticker.get("last") or 0)
-    except (TypeError, ValueError):
-        last_price = 0.0
-    try:
-        contract_size = float(market.get("contractSize") or 1)
-    except (TypeError, ValueError):
-        contract_size = 1.0
-
-    return base_vol * last_price * contract_size
+def is_crypto(base, cg_symbols):
+    b = (base or "").upper()
+    if not b:
+        return False
+    if b in EXCLUDE_STOCKS or b in EXCLUDE_FIAT or b in EXCLUDE_STABLES:
+        return False
+    if b in cg_symbols:
+        return True
+    return normalize_base(b) in cg_symbols
 
 # ============================================================
-# SAFE OHLCV FETCH (thread-safe)
+# PERSISTENT CANDLE STORE
 # ============================================================
-def fetch_ohlcv_safe(ex, symbol, timeframe, limit):
+@st.cache_resource
+def get_candle_store():
+    # dict[symbol][tf] = deque(maxlen=100) of [ts, o, h, l, c, v]
+    return {}
+
+# ============================================================
+# CANDLE FETCH & IN-MEMORY MERGE
+# ============================================================
+def _fetch_candles(ex, symbol, tf, limit):
     if ex is None:
-        return None
+        return []
     try:
         with _fetch_lock:
-            return ex.fetch_ohlcv(symbol, timeframe, limit=limit)
+            result = ex.fetch_ohlcv(symbol, tf, limit=limit)
+        return result or []
     except Exception:
-        return None
+        return []
 
-# ============================================================
-# SCAN ONE TIMEFRAME (incl. 45m resample from 15m)
-# ============================================================
-def scan_timeframe(ex, symbol, tf_label):
-    if tf_label == "45m":
-        ohlcv = fetch_ohlcv_safe(ex, symbol, "15m", 240)
-        if not ohlcv or len(ohlcv) < 60:
-            return None
-        df = pd.DataFrame(
-            ohlcv, columns=["ts", "open", "high", "low", "close", "volume"]
-        )
-        df["dt"] = pd.to_datetime(df["ts"] + 15 * 60 * 1000, unit="ms", utc=True)
-        df = df.set_index("dt")
-        try:
-            res = df.resample("45min", label="right", closed="right").agg({
-                "open": "first",
-                "high": "max",
-                "low": "min",
-                "close": "last",
-                "volume": "sum",
-            }).dropna()
-        except Exception:
-            return None
-        if len(res) < 16:
-            return None
-        closes = res["close"].values.astype(float)
-        last_ts = int(res.index[-2].timestamp() * 1000) if len(res) >= 2 else None
-    else:
-        ohlcv = fetch_ohlcv_safe(ex, symbol, TF_CCXT[tf_label], LOOKBACK)
-        if not ohlcv or len(ohlcv) < 16:
-            return None
-        closes = np.array([c[4] for c in ohlcv], dtype=float)
-        last_ts = int(ohlcv[-2][0]) + TF_MS[tf_label] if len(ohlcv) >= 2 else None
-
-    if len(closes) < 16:
-        return None
-
-    rsi_c = wilder_rsi(closes[:-1])   # closed candle
-    rsi_l = wilder_rsi(closes)        # live forming candle
-    if rsi_c is None:
-        return None
-
-    return {
-        "rsi_closed": round(float(rsi_c), 2),
-        "rsi_live": round(float(rsi_l), 2) if rsi_l is not None else None,
-        "last_close_ts": last_ts,
-    }
-
-# ============================================================
-# SCAN ONE PAIR ACROSS ALL 7 TIMEFRAMES
-# ============================================================
-def scan_pair(ex, pair_info, cg_ranks):
-    symbol = pair_info["symbol"]
-    base = pair_info["base"]
-    results = []
-    closed_os_tfs = []
-
-    for tf in TF_LABELS:
-        d = scan_timeframe(ex, symbol, tf)
-        if d is None:
-            continue
-        rsi_c = d["rsi_closed"]
-        rsi_l = d["rsi_live"]
-        if rsi_c is None:
-            continue
-
-        is_closed_os = rsi_c < 30
-        is_live_os = rsi_l is not None and rsi_l < 30
-        if not (is_closed_os or is_live_os):
-            continue
-
-        disp_rsi = rsi_c if is_closed_os else rsi_l
-        if disp_rsi < 20:
-            status = "Extremely Oversold"
-        elif disp_rsi <= 25:
-            status = "Strongly Oversold"
+def _update_deque(dq, new_candles):
+    if not new_candles:
+        return
+    existing = {c[0]: i for i, c in enumerate(dq)}
+    for nc in new_candles:
+        ts = nc[0]
+        if ts in existing:
+            dq[existing[ts]] = nc
         else:
-            status = "Oversold"
+            dq.append(nc)
 
-        if is_closed_os:
-            closed_os_tfs.append(tf)
+def refresh_pair(ex, symbol, store):
+    if symbol not in store:
+        store[symbol] = {}
+    pair_store = store[symbol]
+    for tf_label, tf_ccxt in TF_CCXT.items():
+        if tf_ccxt is None:
+            continue
+        dq = pair_store.get(tf_label)
+        if dq is None:
+            candles = _fetch_candles(ex, symbol, tf_ccxt, INITIAL_LIMIT)
+            pair_store[tf_label] = deque(candles, maxlen=STORE_MAXLEN)
+        else:
+            candles = _fetch_candles(ex, symbol, tf_ccxt, DELTA_LIMIT)
+            _update_deque(dq, candles)
 
-        results.append({
-            "base": base,
-            "symbol": symbol,
-            "tf": tf,
-            "rsi_closed": rsi_c,
-            "rsi_live": rsi_l,
-            "disp_rsi": round(disp_rsi, 2),
-            "is_closed_os": is_closed_os,
-            "dist_to_50": round(disp_rsi - 50, 2),
-            "status": status,
-            "last_close_ts": d["last_close_ts"],
-            "mcap_rank": cg_ranks.get(base),
-        })
-
-    if results:
-        cnt = len(closed_os_tfs)
-        tf_str = f"{cnt} | " + " · ".join(closed_os_tfs) if closed_os_tfs else "0"
-        for r in results:
-            r["tfs_oversold"] = tf_str
-
-    return results
+def refresh_all(ex, pairs, store):
+    with ThreadPoolExecutor(max_workers=WORKERS) as exe:
+        futures = [
+            exe.submit(refresh_pair, ex, p["symbol"], store)
+            for p in pairs
+        ]
+        for f in as_completed(futures):
+            try:
+                f.result()
+            except Exception:
+                pass
 
 # ============================================================
-# FULL SCAN — cached, keyed on min_vol_value
+# PAIR DISCOVERY (crypto-only, top 180 liquid)
 # ============================================================
-@st.cache_data(ttl=180, show_spinner=False)
-def run_full_scan(min_vol_value):
-    start = time.time()
-    cg_ranks = fetch_coingecko_ranks()
-    ex, ex_id = get_exchange()
-
+def _discover_pairs_impl(ex, cg_symbols, min_vol):
     if ex is None:
-        return pd.DataFrame(), 0, 0, round(time.time() - start, 1), "N/A"
-
+        return []
     try:
         tickers = ex.fetch_tickers()
     except Exception:
-        return pd.DataFrame(), 0, 0, round(time.time() - start, 1), ex_id
-
+        return []
     candidates = []
     for sym, mkt in ex.markets.items():
-        if not mkt.get("swap") or not mkt.get("active"):
+        if not mkt.get("active"):
             continue
-        if mkt.get("quote") != "USDT":
+        if not mkt.get("spot"):
+            continue
+        if mkt.get("quote") not in ("USD", "USDT"):
+            continue
+        base = (mkt.get("base") or "").upper()
+        if not is_crypto(base, cg_symbols):
             continue
         t = tickers.get(sym)
         if not t:
             continue
         vol = calc_volume_usdt(t, mkt)
-        if vol >= min_vol_value:
+        if vol >= min_vol:
             candidates.append({
                 "symbol": sym,
-                "base": mkt.get("base", ""),
+                "base": base,
+                "quote": mkt.get("quote"),
                 "volume": vol,
             })
-
     candidates.sort(key=lambda x: x["volume"], reverse=True)
-    candidates = candidates[:TOP_N_PAIRS]
+    return candidates[:TOP_N_PAIRS]
 
-    if not candidates:
-        return pd.DataFrame(), 0, 0, round(time.time() - start, 1), ex_id
-
-    all_results = []
-    with ThreadPoolExecutor(max_workers=8) as exe:
-        futures = {exe.submit(scan_pair, ex, p, cg_ranks): p for p in candidates}
-        for f in as_completed(futures):
-            try:
-                r = f.result()
-                if r:
-                    all_results.extend(r)
-            except Exception:
-                continue
-
-    elapsed = round(time.time() - start, 1)
-    df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
-    return df, len(candidates), len(all_results), elapsed, ex_id
+@st.cache_data(ttl=60, show_spinner=False)
+def discover_pairs_cached(ex_id, min_vol):
+    ex, _ = get_exchange()
+    if ex is None:
+        return []
+    cg_symbols, _ = fetch_coingecko_set()
+    return _discover_pairs_impl(ex, cg_symbols, min_vol)
 
 # ============================================================
-# LIVE MAJORS TICKER (cached 60s)
+# 45m RESAMPLE (from in-memory 15m deque)
+# ============================================================
+def build_45m_closes(candles_15m):
+    if not candles_15m or len(candles_15m) < 30:
+        return None, None
+    try:
+        df = pd.DataFrame(
+            list(candles_15m),
+            columns=["ts", "open", "high", "low", "close", "volume"],
+        )
+        df["dt"] = pd.to_datetime(
+            df["ts"] + 15 * 60 * 1000, unit="ms", utc=True
+        )
+        df = df.set_index("dt")
+        res = df.resample("45min", label="right", closed="right").agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }).dropna()
+        if len(res) < 16:
+            return None, None
+        closes = res["close"].values.astype(float)
+        last_ts = (
+            int(res.index[-2].timestamp() * 1000)
+            if len(res) >= 2 else None
+        )
+        return closes, last_ts
+    except Exception:
+        return None, None
+
+# ============================================================
+# COMPUTE RSI TABLE FROM IN-MEMORY STORE
+# ============================================================
+def compute_rsi_table(store, pairs, cg_ranks):
+    all_rows = []
+    for p in pairs:
+        symbol = p["symbol"]
+        base = p["base"]
+        if symbol not in store:
+            continue
+        pair_store = store[symbol]
+        pair_rows = []
+        closed_os_tfs = []
+
+        for tf in TF_LABELS:
+            closes = None
+            last_ts = None
+
+            if tf == "45m":
+                dq_15 = pair_store.get("15m")
+                if not dq_15 or len(dq_15) < 30:
+                    continue
+                closes, last_ts = build_45m_closes(list(dq_15))
+            else:
+                dq = pair_store.get(tf)
+                if not dq or len(dq) < 16:
+                    continue
+                candles = list(dq)
+                closes = np.array([c[4] for c in candles], dtype=float)
+                last_ts = (
+                    int(candles[-2][0]) + TF_MS[tf]
+                    if len(candles) >= 2 else None
+                )
+
+            if closes is None or len(closes) < 16:
+                continue
+
+            rsi_c = wilder_rsi(closes[:-1])   # closed-candle RSI
+            rsi_l = wilder_rsi(closes)        # live forming-candle RSI
+            if rsi_c is None:
+                continue
+
+            is_closed_os = rsi_c < 30
+            is_live_os = rsi_l is not None and rsi_l < 30
+            if not (is_closed_os or is_live_os):
+                continue
+
+            disp = rsi_c if is_closed_os else rsi_l
+            if disp < 20:
+                status = "Extremely Oversold"
+            elif disp <= 25:
+                status = "Strongly Oversold"
+            else:
+                status = "Oversold"
+
+            if is_closed_os:
+                closed_os_tfs.append(tf)
+
+            pair_rows.append({
+                "base": base,
+                "symbol": symbol,
+                "quote": p["quote"],
+                "tf": tf,
+                "rsi_closed": round(float(rsi_c), 2),
+                "rsi_live": (
+                    round(float(rsi_l), 2) if rsi_l is not None else None
+                ),
+                "disp_rsi": round(float(disp), 2),
+                "is_closed_os": is_closed_os,
+                "dist_to_50": round(float(disp) - 50, 2),
+                "status": status,
+                "last_close_ts": last_ts,
+                "mcap_rank": cg_ranks.get(base),
+            })
+
+        if pair_rows:
+            cnt = len(closed_os_tfs)
+            tf_str = (
+                f"{cnt} | " + " · ".join(closed_os_tfs)
+                if closed_os_tfs else "0"
+            )
+            for r in pair_rows:
+                r["tfs_oversold"] = tf_str
+            all_rows.extend(pair_rows)
+
+    return pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
+
+# ============================================================
+# LIVE MAJORS TICKER
 # ============================================================
 @st.cache_data(ttl=60, show_spinner=False)
 def get_majors_ticker():
@@ -355,196 +443,231 @@ def get_majors_ticker():
         return {}
     out = {}
     for base in ["BTC", "ETH"]:
-        val = None
-        for sym in [f"{base}/USDT:USDT", f"{base}/USDT"]:
+        for sym in [f"{base}/USD", f"{base}/USDT"]:
             try:
                 if sym in ex.markets:
                     t = ex.fetch_ticker(sym)
-                    val = t.get("percentage")
+                    out[base] = t.get("percentage")
                     break
             except Exception:
                 continue
-        out[base] = val
     return out
 
 # ============================================================
-# FORMAT HELPERS
+# FORMATTERS
 # ============================================================
 def fmt_ts(ts_ms):
     if ts_ms is None or (isinstance(ts_ms, float) and pd.isna(ts_ms)):
         return "—"
     try:
-        return datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc).strftime(
-            "%d %b, %H:%M"
-        )
+        return datetime.fromtimestamp(
+            int(ts_ms) / 1000, tz=timezone.utc
+        ).strftime("%d %b, %H:%M")
     except Exception:
         return "—"
 
 # ============================================================
-# SIDEBAR
+# SIDEBAR (persistent, outside fragment)
 # ============================================================
 ex_ui, ex_id_ui = get_exchange()
 
 with st.sidebar:
     st.title("🔍 RSI Scanner")
     st.caption(f"Exchange: {(ex_id_ui or 'N/A').upper()}")
-
     if st.button("🔄 Refresh Scan Now", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-
     st.divider()
     st.subheader("Live Majors")
     majors = get_majors_ticker()
     for base in ["BTC", "ETH"]:
         pct = majors.get(base)
         try:
-            pct_f = float(pct) if pct is not None else None
-            if pct_f is None or np.isnan(pct_f):
+            if pct is None or (isinstance(pct, float) and np.isnan(pct)):
                 st.markdown(f"**{base}**: —")
             else:
-                cls = "ticker-up" if pct_f >= 0 else "ticker-down"
+                f = float(pct)
+                cls = "ticker-up" if f >= 0 else "ticker-down"
                 st.markdown(
-                    f"**{base}**: <span class='{cls}'>{pct_f:+.2f}%</span>",
+                    f"**{base}**: <span class='{cls}'>{f:+.2f}%</span>",
                     unsafe_allow_html=True,
                 )
         except (TypeError, ValueError):
             st.markdown(f"**{base}**: —")
-
     st.divider()
     st.multiselect(
         "⭐ My Watchlist",
         ["BTC", "ETH", "SOL", "UNI", "AAVE", "ARB", "LINK", "OP"],
-        default=[],
+        default=[], key="watchlist",
     )
 
 if ex_ui is None:
-    st.error("❌ Could not connect to OKX / KuCoin Futures / Bybit. Click Refresh.")
+    st.error("❌ Could not connect to Kraken or Coinbase. Click Refresh.")
     st.stop()
 
 # ============================================================
-# VOLUME CONTROL → directly connected to scan cache key
+# AUTO-REFRESHING SCANNER FRAGMENT
 # ============================================================
-vol_label = st.selectbox(
-    "Min 24h Vol",
-    list(VOL_OPTIONS.keys()),
-    index=2,   # $5M default
-)
-min_vol_value = VOL_OPTIONS[vol_label]
+@st.fragment(run_every=REFRESH_SECS)
+def auto_scanner():
+    t_start = time.time()
+    ex, ex_id = get_exchange()
+    cg_symbols, cg_ranks = fetch_coingecko_set()
+    store = get_candle_store()
 
-with st.spinner("Scanning USDT perpetuals across 7 timeframes..."):
-    df_raw, n_pairs, n_signals, elapsed, ex_used = run_full_scan(min_vol_value)
-
-# ============================================================
-# SUMMARY METRICS
-# ============================================================
-n_confluence = 0
-if not df_raw.empty:
-    closed_df = df_raw[df_raw["is_closed_os"]]
-    n_confluence = int((closed_df.groupby("base")["tf"].nunique() >= 2).sum())
-
-m1, m2, m3, m4 = st.columns(4)
-m1.markdown(
-    f'<div class="metric-card"><h3>Coins Scanned</h3><p>{n_pairs}</p></div>',
-    unsafe_allow_html=True,
-)
-m2.markdown(
-    f'<div class="metric-card"><h3>Oversold Signals</h3><p>{n_signals}</p></div>',
-    unsafe_allow_html=True,
-)
-m3.markdown(
-    f'<div class="metric-card"><h3>Multi-TF Confluence</h3><p>{n_confluence}</p></div>',
-    unsafe_allow_html=True,
-)
-last_scan = datetime.now(timezone.utc).strftime("%d %b, %H:%M UTC")
-m4.markdown(
-    f'<div class="metric-card"><h3>Last Successful Scan</h3>'
-    f'<p style="font-size:1.1rem">{last_scan}</p>'
-    f'<small>Last scan: {elapsed:.1f}s</small></div>',
-    unsafe_allow_html=True,
-)
-
-st.markdown("---")
-
-# ============================================================
-# FILTER BAR
-# ============================================================
-fc1 = st.columns([2, 1.2, 2, 3, 1.5])
-search = fc1[0].text_input("Search Symbol", placeholder="e.g. AAVE")
-rank_sel = fc1[1].selectbox(
-    "Max MCAP Rank",
-    ["All Ranks", "Top 50", "Top 100", "Top 250", "Top 500"],
-    index=0,
-)
-class_sel = fc1[2].multiselect(
-    "Class (RSI)",
-    ["< 20", "20-25", "25-30"],
-    default=["< 20", "20-25", "25-30"],
-)
-tf_sel = fc1[3].multiselect("TF Filter", TF_LABELS, default=TF_LABELS)
-conf_sel = fc1[4].selectbox(
-    "Confluence",
-    ["At least 1 TF", "At least 2 TFs", "At least 3 TFs"],
-    index=0,
-)
-
-live_preview = st.checkbox(
-    "Live-candle preview (include rows where LIVE RSI < 30 even if RSI 14 ≥ 30)",
-    value=False,
-)
-
-# ============================================================
-# APPLY FILTERS
-# ============================================================
-df = df_raw.copy() if not df_raw.empty else pd.DataFrame()
-
-if not df.empty:
-    if not live_preview:
-        df = df[df["is_closed_os"]]
-
-    if search:
-        df = df[df["base"].str.contains(search, case=False, na=False, regex=False)]
-
-    if rank_sel != "All Ranks":
-        max_rank = int(rank_sel.replace("Top ", ""))
-        df = df[df["mcap_rank"].notna() & (df["mcap_rank"] <= max_rank)]
-
-    if tf_sel:
-        df = df[df["tf"].isin(tf_sel)]
-
-    if class_sel:
-        mask = pd.Series(False, index=df.index)
-        if "< 20" in class_sel:
-            mask |= (df["disp_rsi"] < 20)
-        if "20-25" in class_sel:
-            mask |= (df["disp_rsi"] >= 20) & (df["disp_rsi"] <= 25)
-        if "25-30" in class_sel:
-            mask |= (df["disp_rsi"] > 25) & (df["disp_rsi"] <= 30)
-        df = df[mask]
-
-    if conf_sel != "At least 1 TF":
-        min_conf = 2 if conf_sel == "At least 2 TFs" else 3
-        conf_counts = df.groupby("base")["tf"].nunique()
-        valid = conf_counts[conf_counts >= min_conf].index
-        df = df[df["base"].isin(valid)]
-
-# ============================================================
-# TABLE + CSV EXPORT + TRADINGVIEW
-# ============================================================
-if df.empty:
-    st.info(
-        "No coins match the current filters. "
-        "Try relaxing criteria or click Refresh Scan Now."
+    # ---- Volume control (part of scan cache key) ----
+    vol_label = st.selectbox(
+        "Min 24h Vol",
+        list(VOL_OPTIONS.keys()),
+        index=2,
+        key="vol_selector",
     )
-else:
-    df["conf_count"] = df["tfs_oversold"].str.split(" | ").str[0].astype(int)
-    df = df.sort_values(["conf_count", "rsi_closed"], ascending=[False, True])
+    min_vol = VOL_OPTIONS[vol_label]
+
+    # ---- Discover crypto pairs ----
+    pairs = discover_pairs_cached(ex_id, min_vol)
+
+    # ---- Decide refresh: 60s tick OR pair set changed ----
+    prev_symbols = st.session_state.get("_last_pair_symbols")
+    prev_ts = st.session_state.get("_last_refresh_ts", 0)
+    pair_symbols = frozenset(p["symbol"] for p in pairs)
+    symbols_changed = prev_symbols != pair_symbols
+    time_elapsed = (time.time() - prev_ts) > (REFRESH_SECS - 10)
+    is_first_load = not store
+
+    if symbols_changed or time_elapsed or is_first_load:
+        label = "Initial load" if is_first_load else "Delta refresh"
+        with st.spinner(f"{label}: {len(pairs)} crypto pairs..."):
+            refresh_all(ex, pairs, store)
+        st.session_state["_last_pair_symbols"] = pair_symbols
+        st.session_state["_last_refresh_ts"] = time.time()
+
+    # ---- Compute RSI table ----
+    df_raw = compute_rsi_table(store, pairs, cg_ranks)
+    elapsed = time.time() - t_start
+
+    # ---- Summary metrics ----
+    n_pairs = len(pairs)
+    n_signals = len(df_raw) if not df_raw.empty else 0
+    n_confluence = 0
+    if not df_raw.empty:
+        closed = df_raw[df_raw["is_closed_os"]]
+        n_confluence = int(
+            (closed.groupby("base")["tf"].nunique() >= 2).sum()
+        )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(
+        f'<div class="metric-card"><h3>Coins Scanned</h3>'
+        f'<p>{n_pairs}</p></div>',
+        unsafe_allow_html=True,
+    )
+    c2.markdown(
+        f'<div class="metric-card"><h3>Oversold Signals</h3>'
+        f'<p>{n_signals}</p></div>',
+        unsafe_allow_html=True,
+    )
+    c3.markdown(
+        f'<div class="metric-card"><h3>Multi-TF Confluence</h3>'
+        f'<p>{n_confluence}</p></div>',
+        unsafe_allow_html=True,
+    )
+    last_scan = datetime.now(timezone.utc).strftime("%d %b, %H:%M UTC")
+    c4.markdown(
+        f'<div class="metric-card"><h3>Last Successful Scan</h3>'
+        f'<p style="font-size:1.05rem">{last_scan}</p>'
+        f'<small>Scan: {elapsed:.1f}s</small></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+
+    # ---- Filter bar ----
+    f1 = st.columns([2, 1.2, 2, 3, 1.5])
+    search = f1[0].text_input(
+        "Search Symbol", key="f_search", placeholder="e.g. AAVE"
+    )
+    rank_sel = f1[1].selectbox(
+        "Max MCAP Rank",
+        ["All Ranks", "Top 50", "Top 100", "Top 250", "Top 500"],
+        index=0,
+        key="f_rank",
+    )
+    class_sel = f1[2].multiselect(
+        "Class (RSI)",
+        ["< 20", "20-25", "25-30"],
+        default=["< 20", "20-25", "25-30"],
+        key="f_class",
+    )
+    tf_sel = f1[3].multiselect(
+        "TF Filter", TF_LABELS, default=TF_LABELS, key="f_tf"
+    )
+    conf_sel = f1[4].selectbox(
+        "Confluence",
+        ["At least 1 TF", "At least 2 TFs", "At least 3 TFs"],
+        index=0,
+        key="f_conf",
+    )
+    live_preview = st.checkbox(
+        "Live-candle preview "
+        "(include LIVE RSI < 30 even if RSI 14 ≥ 30)",
+        value=False,
+        key="f_live",
+    )
+
+    # ---- Apply filters ----
+    df = df_raw.copy() if not df_raw.empty else pd.DataFrame()
+    if not df.empty:
+        if not live_preview:
+            df = df[df["is_closed_os"]]
+        if search:
+            df = df[
+                df["base"].str.contains(
+                    search, case=False, na=False, regex=False
+                )
+            ]
+        if rank_sel != "All Ranks":
+            max_rank = int(rank_sel.replace("Top ", ""))
+            df = df[
+                df["mcap_rank"].notna() & (df["mcap_rank"] <= max_rank)
+            ]
+        if tf_sel:
+            df = df[df["tf"].isin(tf_sel)]
+        if class_sel:
+            mask = pd.Series(False, index=df.index)
+            if "< 20" in class_sel:
+                mask |= (df["disp_rsi"] < 20)
+            if "20-25" in class_sel:
+                mask |= (df["disp_rsi"] >= 20) & (df["disp_rsi"] <= 25)
+            if "25-30" in class_sel:
+                mask |= (df["disp_rsi"] > 25) & (df["disp_rsi"] <= 30)
+            df = df[mask]
+        if conf_sel != "At least 1 TF":
+            min_conf = 2 if conf_sel == "At least 2 TFs" else 3
+            conf_counts = df.groupby("base")["tf"].nunique()
+            valid = conf_counts[conf_counts >= min_conf].index
+            df = df[df["base"].isin(valid)]
+
+    # ---- Render table ----
+    if df.empty:
+        st.info(
+            "No coins match the current filters. "
+            "Try relaxing criteria or click Refresh."
+        )
+        return
+
+    df["conf_count"] = (
+        df["tfs_oversold"].str.split(" | ").str[0].astype(int)
+    )
+    df = df.sort_values(
+        ["conf_count", "rsi_closed"], ascending=[False, True]
+    )
 
     display_df = pd.DataFrame({
         "MCAP RANK": df["mcap_rank"].apply(
             lambda x: f"#{int(x)}" if pd.notna(x) else "Unranked"
         ),
-        "SYMBOL": df["base"] + " /USDT",
+        "SYMBOL": df["base"] + " /" + df["quote"],
         "TF": df["tf"],
         "RSI 14": df["rsi_closed"],
         "LIVE RSI": df["rsi_live"],
@@ -580,7 +703,9 @@ else:
         .map(style_rsi, subset=["RSI 14", "LIVE RSI"])
     )
 
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+    st.dataframe(
+        styled, use_container_width=True, hide_index=True, height=500
+    )
 
     csv = display_df.to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -588,25 +713,20 @@ else:
         csv,
         "rsi_oversold_scan.csv",
         "text/csv",
+        key="csv_dl",
     )
 
+    # ---- TradingView chart ----
     st.markdown("---")
     st.subheader("📈 TradingView Chart")
 
-    coin_sel = st.selectbox(
-        "Select coin for chart", sorted(df["base"].unique())
-    )
-
-    if coin_sel:
-        if ex_used == "okx":
-            tv_symbol = f"OKX:{coin_sel}USDT.P"
-        elif ex_used == "kucoinfutures":
-            tv_symbol = f"KUCOIN:{coin_sel}USDTM"
-        elif ex_used == "bybit":
-            tv_symbol = f"BYBIT:{coin_sel}USDT.P"
-        else:
-            tv_symbol = f"OKX:{coin_sel}USDT.P"
-
+    df["_base_quote"] = df["base"] + "|" + df["quote"]
+    options = sorted(df["_base_quote"].unique())
+    sel = st.selectbox("Select coin", options, key="chart_sel")
+    if sel:
+        b, q = sel.split("|")
+        exch_prefix = "KRAKEN" if ex_id == "kraken" else "COINBASE"
+        tv_symbol = f"{exch_prefix}:{b}{q}"
         tv_html = f"""
         <div id="tv_chart" style="height:520px"></div>
         <script src="https://s3.tradingview.com/tv.js"></script>
@@ -626,3 +746,8 @@ else:
         </script>
         """
         components.html(tv_html, height=540)
+
+# ============================================================
+# RUN
+# ============================================================
+auto_scanner()
