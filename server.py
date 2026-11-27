@@ -22,7 +22,9 @@ MAGIC_RSI_LEVEL = 30
 MAGIC_CONF_BARS = 3
 OVERSOLD_TFS = ['5m','15m','30m','45m','1H','2H','4H']
 RETEST_TFS = ['3m','5m','15m','30m','45m','1H','4H']
-CONCURRENCY = 16
+# Change from 16 to 3 or 4. 
+# This spaces out the requests enough to stay under the radar.
+CONCURRENCY = 4 
 SCAN_INTERVAL_SEC = 180
 MAX_SYMBOLS = 2000
 MIN_VOL = 1000000
@@ -131,11 +133,21 @@ def normalize_base(base):
 session = requests.Session()
 session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
-def fetch_json(url, timeout=12):
-    try:
-        r = session.get(url, timeout=timeout)
-        if r.status_code == 200: return r.json()
-    except: pass
+def fetch_json(url, timeout=12, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            r = session.get(url, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+            elif r.status_code == 429:
+                # 429 = Rate Limited. Sleep with exponential backoff (2s, 4s, 8s)
+                sleep_time = (2 ** attempt) + 1
+                print(f"Rate limited by {url.split('/')[2]}. Sleeping {sleep_time}s...")
+                time.sleep(sleep_time)
+            else:
+                break # Other HTTP errors (400, 404, etc.)
+        except Exception as e:
+            time.sleep(1)
     return None
 
 def bybit_instruments():
@@ -245,16 +257,39 @@ def get_cg_ranks():
 
 def fetch_all_klines(symbol, exchange, tfs):
     out = {}
+    now = time.time() * 1000
+    
     for tf in tfs:
+        cache_key = f"{symbol}_{exchange}_{tf}"
+        
+        # Determine how long we can safely cache this timeframe
+        if tf == '45m':
+            ttl = 900000  # Cache 45m for 15 mins
+        else:
+            # Cache for half the timeframe duration (e.g., 1H caches for 30 mins)
+            # But minimum 60 seconds so we don't spam 3m/5m charts
+            ttl = max(TF_MS[tf] * 0.5, 60000) 
+            
+        if cache_key in KLINE_CACHE:
+            cached_time, cached_data = KLINE_CACHE[cache_key]
+            if (now - cached_time) < ttl:
+                out[tf] = cached_data
+                continue # Skip fetching, use cache
+                
+        # If no cache or expired, fetch from API
         try:
             if tf == '45m':
                 c15 = bybit_klines(symbol, '15m', 240) if exchange == 'BYBIT' else binance_klines(symbol, '15m', 240)
-                out[tf] = resample_45m(c15)
+                data = resample_45m(c15)
             else:
-                out[tf] = bybit_klines(symbol, tf) if exchange == 'BYBIT' else binance_klines(symbol, tf)
-        except: out[tf] = []
+                data = bybit_klines(symbol, tf) if exchange == 'BYBIT' else binance_klines(symbol, tf)
+                
+            KLINE_CACHE[cache_key] = (now, data)
+            out[tf] = data
+        except:
+            out[tf] = []
+            
     return out
-
 # ==========================================
 # STRATEGIES
 # ==========================================
