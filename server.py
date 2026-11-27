@@ -60,7 +60,7 @@ STATE = {
 STATE_LOCK = threading.Lock()
 SCAN_EVENT = threading.Event()
 TRACKED_ZONES = []
-
+KLINE_CACHE = {}   # <--- ADD THIS LINE
 # ==========================================
 # SAFE CONVERSION HELPERS
 # ==========================================
