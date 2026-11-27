@@ -468,10 +468,14 @@ def run_scan():
         calls = 0
         done = 0
 
-        def process_candidate(inst):
+                def process_candidate(inst):
             nonlocal calls
-            klines = fetch_all_klines(inst['symbol'], inst['exchange'], ALL_TFS)
-            calls += len(klines)
+            try:
+                klines = fetch_all_klines(inst['symbol'], inst['exchange'], ALL_TFS)
+                calls += len(klines)
+            except Exception as e:
+                print(f"SCAN ERROR on {inst['symbol']}: {e}")
+                return
 
             for tf in MAGIC_TFS:
                 if len(klines.get(tf, [])) >= 110:
