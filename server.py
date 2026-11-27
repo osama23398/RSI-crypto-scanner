@@ -468,7 +468,7 @@ def run_scan():
         calls = 0
         done = 0
 
-                def process_candidate(inst):
+        def process_candidate(inst):
             nonlocal calls
             try:
                 klines = fetch_all_klines(inst['symbol'], inst['exchange'], ALL_TFS)
