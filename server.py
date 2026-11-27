@@ -27,7 +27,7 @@ RETEST_TFS = ['3m','5m','15m','30m','45m','1H','4H']
 CONCURRENCY = 10 
 SCAN_INTERVAL_SEC = 180
 MAX_SYMBOLS = 2000
-MIN_VOL = 1000000
+MIN_VOL = 0  # Let the frontend UI handle the volume filtering
 MAGIC_MIN_VOL = 1000000
 
 TF_BYBIT = {'3m':'3','5m':'5','15m':'15','30m':'30','1H':'60','2H':'120','4H':'240','6H':'360','12H':'720','1D':'D','1W':'W'}
