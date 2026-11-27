@@ -24,7 +24,7 @@ OVERSOLD_TFS = ['5m','15m','30m','45m','1H','2H','4H']
 RETEST_TFS = ['3m','5m','15m','30m','45m','1H','4H']
 # Change from 16 to 3 or 4. 
 # This spaces out the requests enough to stay under the radar.
-CONCURRENCY = 4 
+CONCURRENCY = 10 
 SCAN_INTERVAL_SEC = 180
 MAX_SYMBOLS = 2000
 MIN_VOL = 1000000
@@ -133,20 +133,41 @@ def normalize_base(base):
 session = requests.Session()
 session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
+# Add these 3 lines near the top of server.py (under CONCURRENCY)
+MAX_RPS = 40
+RATE_LOCK = threading.Lock()
+RATE_STATE = {'count': 0, 'window_start': time.time()}
+
 def fetch_json(url, timeout=12, max_retries=3):
+    global RATE_STATE
     for attempt in range(max_retries):
+        with RATE_LOCK:
+            now = time.time()
+            # Reset counter if 1 second has passed
+            if now - RATE_STATE['window_start'] >= 1.0:
+                RATE_STATE['count'] = 0
+                RATE_STATE['window_start'] = now
+            
+            # If we hit 40 requests, sleep until the next second
+            if RATE_STATE['count'] >= MAX_RPS:
+                sleep_time = 1.0 - (now - RATE_STATE['window_start'])
+                if sleep_time > 0: time.sleep(sleep_time)
+                RATE_STATE['count'] = 0
+                RATE_STATE['window_start'] = time.time()
+            
+            RATE_STATE['count'] += 1
+
         try:
             r = session.get(url, timeout=timeout)
             if r.status_code == 200:
                 return r.json()
             elif r.status_code == 429:
-                # 429 = Rate Limited. Sleep with exponential backoff (2s, 4s, 8s)
                 sleep_time = (2 ** attempt) + 1
                 print(f"Rate limited by {url.split('/')[2]}. Sleeping {sleep_time}s...")
                 time.sleep(sleep_time)
             else:
-                break # Other HTTP errors (400, 404, etc.)
-        except Exception as e:
+                break
+        except Exception:
             time.sleep(1)
     return None
 
@@ -433,12 +454,16 @@ def run_scan():
             by_ins, bn_ins = f_ins.result(), f_ins2.result()
             by_tk, bn_tk = f_tk.result(), f_tk2.result()
             bn_fund, cg = f_fund.result(), f_cg.result()
-
         tk_map = {}
-        for t in by_tk: tk_map[t['symbol']] = t
+        # 1. Load Binance tickers first
         for t in bn_tk:
-            if t['symbol'] not in tk_map or t['vol'] > tk_map[t['symbol']]['vol']:
-                if t['symbol'] in bn_fund: t.update(bn_fund[t['symbol']])
+            if t['symbol'] in bn_fund: 
+                t.update(bn_fund[t['symbol']])
+            tk_map[t['symbol']] = t
+            
+        # 2. Load Bybit tickers ONLY if the coin doesn't exist on Binance
+        for t in by_tk:
+            if t['symbol'] not in tk_map:
                 tk_map[t['symbol']] = t
 
         with STATE_LOCK: STATE['tickers'] = list(tk_map.values())
@@ -447,9 +472,16 @@ def run_scan():
         with STATE_LOCK: STATE['commodities'] = comm
 
         seen, dedup = set(), []
-        for i in by_ins + bn_ins:
+        # 1. Add Binance USDT.P instruments first
+        for i in bn_ins:
             if i['symbol'] not in seen:
-                seen.add(i['symbol']); dedup.append(i)
+                seen.add(i['symbol']); 
+                dedup.append(i)
+        # 2. Add Bybit USDT.P instruments ONLY if not already on Binance
+        for i in by_ins:
+            if i['symbol'] not in seen:
+                seen.add(i['symbol']); 
+                dedup.append(i)
 
         raw_cands = []
         for i in dedup:
