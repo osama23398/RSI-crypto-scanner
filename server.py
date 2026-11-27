@@ -60,6 +60,30 @@ SCAN_EVENT = threading.Event()
 TRACKED_ZONES = []
 
 # ==========================================
+# SAFE CONVERSION HELPERS
+# ==========================================
+def safe_float(val, default=0.0):
+    if val is None:
+        return default
+    try:
+        if isinstance(val, str):
+            val = val.strip()
+            if not val:
+                return default
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
+
+def safe_int(val, default=0):
+    try:
+        return int(safe_float(val, default))
+    except (ValueError, TypeError):
+        return default
+
+# ==========================================
 # MATH ENGINE
 # ==========================================
 def wilder_rsi(closes, period=14):
@@ -122,14 +146,30 @@ def bybit_instruments():
 def bybit_tickers():
     d = fetch_json('https://api.bybit.com/v5/market/tickers?category=linear')
     if not d or 'result' not in d: return []
-    return [{'symbol': t['symbol'], 'last': float(t['lastPrice']), 'change24h': float(t['price24hPcnt']) * 100, 'vol': float(t['turnover24h']), 'funding': float(t['fundingRate']), 'nextFunding': int(t['nextFundingTime']), 'mark': float(t['markPrice']), 'exchange': 'BYBIT'} for t in d['result'].get('list', [])]
+    return [{
+        'symbol': t['symbol'],
+        'last': safe_float(t.get('lastPrice')),
+        'change24h': safe_float(t.get('price24hPcnt')) * 100,
+        'vol': safe_float(t.get('turnover24h')),
+        'funding': safe_float(t.get('fundingRate')),
+        'nextFunding': safe_int(t.get('nextFundingTime')),
+        'mark': safe_float(t.get('markPrice')),
+        'exchange': 'BYBIT'
+    } for t in d['result'].get('list', [])]
 
 def bybit_klines(symbol, tf, limit=1000):
     iv = TF_BYBIT.get(tf)
     if not iv: return []
     d = fetch_json(f'https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={iv}&limit={limit}')
     if not d or 'result' not in d: return []
-    return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]), 'low': float(k[3]), 'close': float(k[4]), 'volume': float(k[5])} for k in reversed(d['result'].get('list', []))]
+    return [{
+        'ts': safe_int(k[0]),
+        'open': safe_float(k[1]),
+        'high': safe_float(k[2]),
+        'low': safe_float(k[3]),
+        'close': safe_float(k[4]),
+        'volume': safe_float(k[5])
+    } for k in reversed(d['result'].get('list', []))]
 
 def binance_instruments():
     d = fetch_json('https://fapi.binance.com/fapi/v1/exchangeInfo')
@@ -139,19 +179,39 @@ def binance_instruments():
 def binance_tickers():
     d = fetch_json('https://fapi.binance.com/fapi/v1/ticker/24hr')
     if not d: return []
-    return [{'symbol': t['symbol'], 'last': float(t['lastPrice']), 'change24h': float(t['priceChangePercent']), 'vol': float(t['quoteVolume']), 'funding': None, 'nextFunding': None, 'mark': float(t['lastPrice']), 'exchange': 'BINANCE'} for t in d if t['symbol'].endswith('USDT')]
+    return [{
+        'symbol': t['symbol'],
+        'last': safe_float(t.get('lastPrice')),
+        'change24h': safe_float(t.get('priceChangePercent')),
+        'vol': safe_float(t.get('quoteVolume')),
+        'funding': None,
+        'nextFunding': None,
+        'mark': safe_float(t.get('lastPrice')),
+        'exchange': 'BINANCE'
+    } for t in d if t.get('symbol', '').endswith('USDT')]
 
 def binance_funding():
     d = fetch_json('https://fapi.binance.com/fapi/v1/premiumIndex')
     if not d: return {}
-    return {x['symbol']: {'funding': float(x['lastFundingRate']), 'nextFunding': int(x['nextFundingTime']), 'mark': float(x['markPrice'])} for x in d}
+    return {x['symbol']: {
+        'funding': safe_float(x.get('lastFundingRate')),
+        'nextFunding': safe_int(x.get('nextFundingTime')),
+        'mark': safe_float(x.get('markPrice'))
+    } for x in d if x.get('symbol')}
 
 def binance_klines(symbol, tf, limit=1000):
     iv = TF_BINANCE.get(tf)
     if not iv: return []
     d = fetch_json(f'https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={iv}&limit={limit}')
     if not d: return []
-    return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]), 'low': float(k[3]), 'close': float(k[4]), 'volume': float(k[5])} for k in d]
+    return [{
+        'ts': safe_int(k[0]),
+        'open': safe_float(k[1]),
+        'high': safe_float(k[2]),
+        'low': safe_float(k[3]),
+        'close': safe_float(k[4]),
+        'volume': safe_float(k[5])
+    } for k in d]
 
 def resample_45m(c15):
     if not c15: return []
@@ -203,7 +263,7 @@ def detect_magic(candles, tf, conf_candles):
     n = len(candles)
     req = 3 if tf in ['15m', '1H'] else 2
     if n < MAGIC_LOOKBACK + req + 5: return []
-    
+
     period = 14
     closes = [c['close'] for c in candles]
     rsi_raw = rsi_series(closes, period)
@@ -325,7 +385,7 @@ def run_scan():
     with STATE_LOCK:
         STATE['loading'] = True
         STATE['progress'] = 0
-    
+
     try:
         with ThreadPoolExecutor(max_workers=10) as ex:
             f_ins = ex.submit(bybit_instruments)
@@ -334,20 +394,20 @@ def run_scan():
             f_tk2 = ex.submit(binance_tickers)
             f_fund = ex.submit(binance_funding)
             f_cg = ex.submit(get_cg_ranks)
-            
+
             by_ins, bn_ins = f_ins.result(), f_ins2.result()
             by_tk, bn_tk = f_tk.result(), f_tk2.result()
             bn_fund, cg = f_fund.result(), f_cg.result()
-            
+
         tk_map = {}
         for t in by_tk: tk_map[t['symbol']] = t
         for t in bn_tk:
             if t['symbol'] not in tk_map or t['vol'] > tk_map[t['symbol']]['vol']:
                 if t['symbol'] in bn_fund: t.update(bn_fund[t['symbol']])
                 tk_map[t['symbol']] = t
-                
+
         with STATE_LOCK: STATE['tickers'] = list(tk_map.values())
-        
+
         comm = [{'symbol': s, **tk_map.get(s, {})} for s in COMM_SYMBOLS if s in tk_map and tk_map[s].get('last')]
         with STATE_LOCK: STATE['commodities'] = comm
 
@@ -366,7 +426,7 @@ def run_scan():
         has_rank = len(cg) > 200
         strict = [i for i in raw_cands if i['rank'] is not None] if has_rank else raw_cands
         candidates = sorted((strict if len(strict) >= 30 else raw_cands), key=lambda x: x['vol'], reverse=True)[:MAX_SYMBOLS]
-        
+
         with STATE_LOCK: STATE['scanStats']['coins'] = len(candidates)
 
         magic, magicrec, retest, oversold, funding = [], [], [], [], []
@@ -377,7 +437,7 @@ def run_scan():
             nonlocal calls
             klines = fetch_all_klines(inst['symbol'], inst['exchange'], ALL_TFS)
             calls += len(klines)
-            
+
             for tf in MAGIC_TFS:
                 if len(klines.get(tf, [])) >= 110:
                     conf = klines.get(CONF_TF.get(tf))
@@ -386,17 +446,17 @@ def run_scan():
                         magic.append({**inst, 'tf': tf, **m})
                         if not any(z['sym'] == inst['symbol'] and z['tf'] == tf and z['t'] == m['t'] for z in TRACKED_ZONES):
                             TRACKED_ZONES.append({'sym': inst['symbol'], 'tf': tf, 'top': m['top'], 'bot': m['bot'], 't': m['t'], 'ts': int(time.time()*1000), 'tp': 0, 'dd': 0, 'done': False})
-            
+
             for tf in OVERSOLD_TFS:
                 if len(klines.get(tf, [])) >= 20:
                     o = detect_oversold(klines[tf], tf)
                     if o: oversold.append({**inst, 'tf': tf, **o})
-                    
+
             for tf in RETEST_TFS:
                 if len(klines.get(tf, [])) >= 20:
                     r = detect_retest(klines[tf], tf)
                     if r: retest.append({**inst, 'tf': tf, **r})
-                    
+
             t = inst['ticker']
             if t.get('funding') is not None and t['funding'] < 0:
                 funding.append({**inst, 'rate': t['funding'], 'next': t.get('nextFunding'), 'mark': t.get('mark')})
@@ -418,25 +478,25 @@ def run_scan():
                 if dd > z['dd']: z['dd'] = dd
                 if t['last'] > z['top']: z['done'] = True
                 elif dd >= 1: z['tp'] = max(z['tp'], 3 if dd >= 5 else 2 if dd >= 3 else 1)
-                
+
         magicrec = [{'symbol': z['sym'], 'sym': z['sym'], 'exchange': 'BYBIT', 'tf': z['tf'], **z} for z in TRACKED_ZONES if z.get('retested') and not z['done'] and z['tp'] > 0]
         TRACKED_ZONES = [z for z in TRACKED_ZONES if not z['done']][-200:]
-        
+
         with open(TRACKED_FILE, 'w') as f: json.dump(TRACKED_ZONES, f)
 
         # Fetch Alts
         movers = sorted([{'symbol': c['symbol'], 'exchange': c['exchange'], 'vol': c['vol'], 'chg': c.get('change', 0)} for c in candidates if c['vol'] >= 2000000], key=lambda x: x['chg'], reverse=True)
         bull_c, bear_c = movers[:15], movers[-15:][::-1]
-        
+
         def get_alt_rsi(c):
             try:
                 k = fetch_all_klines(c['symbol'], c['exchange'], ['1H'])
                 return {**c, 'r1': wilder_rsi([x['close'] for x in k['1H'][:-1]])}
             except: return {**c, 'r1': None}
-            
+
         bull_r = [get_alt_rsi(c) for c in bull_c]
         bear_r = [get_alt_rsi(c) for c in bear_c]
-        
+
         # Save Signals for OpenClaw
         signals_out = {
             'timestamp': int(time.time() * 1000),
