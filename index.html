@@ -1,1 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RSI — Market Scanner</title>
+<style>
+:root {
+  --bg: #0b0e14; --panel: #12151b; --hover: #1a1f29;
+  --border: rgba(255,255,255,0.08); --text: #e6e9ef; --muted: #8b95a5;
+  --green: #3ddc84; --red: #f23645; --amber: #f2b544; --blue: #5b9cff;
+  --mono: 'SF Mono','Fira Code','Cascadia Code',monospace;
+}
+[data-theme="light"] {
+  --bg: #f4f6fa; --panel: #ffffff; --hover: #eef1f6;
+  --border: rgba(0,0,0,0.08); --text: #111827; --muted: #6b7280;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; font-size: 13px; overflow: hidden; }
+.app { display: flex; height: 100vh; }
+.side { width: 260px; min-width: 260px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; padding: 12px 0; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 16px 16px; }
+.brand-logo { width: 32px; height: 32px; border-radius: 8px; background: var(--blue); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 16px; color: #fff; }
+.brand-name { font-weight: 700; font-size: 14px; }
+.brand-sub { font-size: 10px; color: var(--muted); }
+.nav-section { padding: 8px 16px; font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; }
+.nav-item { display: flex; align-items: center; gap: 8px; padding: 6px 16px; cursor: pointer; color: var(--muted); transition: background 0.1s; }
+.nav-item:hover { background: var(--hover); }
+.nav-item.active { color: var(--text); background: var(--hover); border-left: 2px solid var(--blue); }
+.nav-item .badge { margin-left: auto; background: var(--hover); padding: 1px 6px; border-radius: 10px; font-size: 10px; font-family: var(--mono); }
+.top { height: 48px; min-height: 48px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 12px; }
+.top-search { flex: 1; max-width: 400px; position: relative; }
+.top-search input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; color: var(--text); font-size: 12px; outline: none; }
+.status-pill { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; background: var(--hover); font-size: 11px; font-family: var(--mono); }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.btn { background: var(--hover); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; color: var(--text); cursor: pointer; font-size: 12px; transition: background 0.1s; }
+.btn:hover { background: rgba(255,255,255,0.06); }
+.btn-primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.kpi-row { display: grid; grid-template-columns: repeat(5,1fr); gap: 8px; padding: 12px 16px; }
+.kpi-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.kpi-label { font-size: 10px; color: var(--muted); text-transform: uppercase; }
+.kpi-value { font-size: 20px; font-weight: 700; font-family: var(--mono); margin-top: 4px; }
+.kpi-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.progress-bar { height: 3px; background: var(--border); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--blue); border-radius: 2px; transition: width 0.3s; }
+.tab-bar { display: flex; gap: 2px; padding: 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tab { padding: 8px 16px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-size: 12px; white-space: nowrap; }
+.tab.active { color: var(--text); border-bottom-color: var(--blue); }
+.tab .count { background: var(--hover); padding: 1px 6px; border-radius: 8px; font-size: 10px; margin-left: 4px; font-family: var(--mono); }
+.filter-bar { display: flex; gap: 8px; padding: 8px 16px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.filter-bar select, .filter-bar input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; color: var(--text); font-size: 11px; outline: none; }
+.chip { padding: 3px 8px; border-radius: 4px; background: var(--hover); border: 1px solid var(--border); cursor: pointer; font-size: 10px; font-family: var(--mono); }
+.chip.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+.table-wrap { flex: 1; overflow: auto; padding: 0 16px 16px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; padding: 8px 10px; color: var(--muted); font-weight: 500; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); cursor: pointer; white-space: nowrap; z-index: 2; }
+td { padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,0.03); font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr:hover td { background: var(--hover); }
+.tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+.tag-green { background: rgba(61,220,132,0.15); color: var(--green); }
+.tag-red { background: rgba(242,54,69,0.15); color: var(--red); }
+.tag-amber { background: rgba(242,181,68,0.15); color: var(--amber); }
+.tag-blue { background: rgba(91,156,255,0.15); color: var(--blue); }
+.text-green { color: var(--green); } .text-red { color: var(--red); } .text-amber { color: var(--amber); } .text-muted { color: var(--muted); }
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px; color: var(--muted); }
+.empty-state .icon { font-size: 32px; margin-bottom: 12px; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 1000; }
+.modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 440px; max-width: 90vw; max-height: 85vh; overflow-y: auto; }
+.modal h2 { font-size: 16px; margin-bottom: 16px; }
+.modal label { display: block; font-size: 11px; color: var(--muted); margin: 10px 0 4px; }
+.modal input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-size: 12px; outline: none; }
+.coin-view { padding: 16px; overflow-y: auto; flex: 1; display: none; }
+.tv-chart { height: 500px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+.rsi-sidebar { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.rsi-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.rsi-card h3 { font-size: 11px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; }
+.rsi-row { display: flex; justify-content: space-between; padding: 3px 0; font-family: var(--mono); font-size: 11px; }
+.overlay-scroll { overflow-y: auto; height: calc(100vh - 48px); padding: 16px; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.dropdown-search { position: absolute; top: 100%; left: 0; right: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; z-index: 50; display: none; }
+</style>
+</head>
+<body data-theme="dark">
+<div class="app">
+  <!-- SIDEBAR -->
+  <aside class="side" id="sidebar"></aside>
+  
+  <!-- MAIN -->
+  <div class="main">
+    <!-- TOP BAR -->
+    <header class="top">
+      <div class="top-search">
+        <input id="global-search" placeholder="Search any coin, chart or page…" autocomplete="off" />
+        <div id="search-dropdown" class="dropdown-search"></div>
+      </div>
+      <div class="status-pill"><span class="status-dot" id="status-dot"></span><span id="status-text">Live</span></div>
+      <button class="btn" id="btn-refresh" onclick="triggerScan()">Refresh now</button>
+      <button class="btn" onclick="toggleTheme()" id="theme-btn">☀︎</button>
+      <button class="btn" onclick="document.getElementById('settings-modal').style.display='flex'">⚙ Settings</button>
+    </header>
 
+    <!-- SCANNER VIEW -->
+    <div id="scanner-view" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
+      <div class="kpi-row" id="kpi-row"></div>
+      <div class="tab-bar" id="tab-bar"></div>
+      <div class="filter-bar" id="filter-bar">
+        <input placeholder="Symbol search…" id="filter-search" style="width:140px" />
+        <select id="filter-vol">
+          <option value="0">Any vol</option><option value="1000000">$1M</option>
+          <option value="5000000" selected>$5M</option><option value="20000000">$20M</option><option value="100000000">$100M</option>
+        </select>
+        <select id="filter-rank">
+          <option value="1500" selected>All ranks</option><option value="100">Top 100</option>
+          <option value="300">Top 300</option><option value="500">Top 500</option><option value="1000">Top 1000</option>
+        </select>
+        <div id="tf-chips" style="display:flex; gap:4px;"></div>
+        <label style="font-size:10px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="filter-sound" />🔔 Sound</label>
+        <button class="btn" style="margin-left:auto;" onclick="exportCSV()">Export CSV</button>
+      </div>
+      <div class="table-wrap" id="table-wrap">
+        <table>
+          <thead id="table-head"></thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+      <div id="empty-state" class="empty-state" style="display:none;"><div class="icon">◌</div><div>No signals — run a scan or adjust filters.</div></div>
+    </div>
+
+    <!-- COIN VIEW -->
+    <div id="coin-view" class="coin-view">
+      <div style="display:flex; align-items:center; gap:16px; margin-bottom:16px; flex-wrap:wrap;">
+        <button class="btn" onclick="closeCoinView()">← Back</button>
+        <strong id="cv-symbol">BTC/USDT</strong>
+        <span class="tag tag-blue" id="cv-exch">BYBIT</span>
+        <span class="mono" style="font-size:28px; font-weight:700;" id="cv-price">—</span>
+        <span class="mono" id="cv-change">—</span>
+        <button class="btn" id="cv-watch" onclick="toggleWatchList()">☆ Watchlist</button>
+      </div>
+      <div class="tv-chart" id="tv-chart"></div>
+      <div class="rsi-sidebar">
+        <div class="rsi-card"><h3>RSI vs MA (SMA 14 · live)</h3>
+          <div class="rsi-row"><span>15m</span><span class="text-green">▲ Above</span></div>
+          <div class="rsi-row"><span>30m</span><span class="text-red">▼ Below</span></div>
+          <div class="rsi-row"><span>1H</span><span class="text-green">▲ Above</span></div>
+          <div class="rsi-row"><span>4H</span><span class="text-amber">— Neutral</span></div>
+        </div>
+        <div class="rsi-card"><h3>Regime · 4H and higher</h3>
+          <div class="rsi-row"><span>4H</span><span id="cv-regime">—</span></div>
+          <div class="rsi-row"><span>1D</span><span class="text-muted">—</span></div>
+          <div class="rsi-row"><span>1W</span><span class="text-muted">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal-overlay" id="settings-modal" onclick="if(event.target===this)this.style.display='none'">
+  <div class="modal">
+    <h2>Settings</h2>
+    <p class="text-muted" style="margin-bottom:16px;">Settings are managed on the backend VPS.</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn" onclick="document.getElementById('settings-modal').style.display='none'">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ==========================================
+// STATE & UTILS
+// ==========================================
+const appState = {
+  rows: { magic: [], magicrec: [], retest: [], oversold: [], funding: [] },
+  tickers: [], ranks: {}, commodities: [], alts: { bull: [], bear: [] },
+  scanStats: { coins: 0, calls: 0 }, lastScan: null, nextScanTs: null,
+  loading: false, progress: 0
+};
+
+const uiState = {
+  page: 'scanner', tab: 'magic', search: '', minVol: 5000000, maxRank: 1500,
+  tfFilter: [], sound: false, sort: { key: null, dir: -1 }, selectedCoin: null,
+  watchlist: JSON.parse(localStorage.getItem('nazWatch') || '[]'),
+  theme: localStorage.getItem('theme') || 'dark'
+};
+
+const TABS = [
+  ['magic','✨ Magical shorts'], ['magicrec','✅ Short results'], 
+  ['retest','RSI 70 → 52 Retests'], ['oversold','Oversold'], ['funding','Negative funding']
+];
+const TFS = ['15m','30m','1H','2H','4H','6H','12H','1D'];
+
+function fmt(n, d=2) { if(n==null||isNaN(n)) return '—'; const a=Math.abs(n); if(a>=1e9)return (n/1e9).toFixed(d)+'B'; if(a>=1e6)return (n/1e6).toFixed(d)+'M'; if(a>=1e3)return (n/1e3).toFixed(d)+'K'; return n.toFixed(d); }
+function pct(n) { return n==null||isNaN(n)?'—':(n>=0?'+':'')+n.toFixed(2)+'%'; }
+
+// ==========================================
+// API & DATA FETCHING
+// ==========================================
+async function fetchData() {
+  try {
+    const res = await fetch('/api/data');
+    const data = await res.json();
+    Object.assign(appState, data);
+    updateUI();
+  } catch (e) { console.error('API Error', e); }
+}
+
+async function triggerScan() {
+  await fetch('/api/scan-now', { method: 'POST' });
+  document.getElementById('status-text').innerText = 'Scanning...';
+  document.getElementById('btn-refresh').disabled = true;
+}
+
+setInterval(fetchData, 5000);
+
+// ==========================================
+// RENDER FUNCTIONS
+// ==========================================
+function updateUI() {
+  if (uiState.selectedCoin) {
+    renderCoinView();
+    return;
+  }
+  
+  renderSidebar();
+  renderKPIs();
+  renderTabs();
+  renderTable();
+  updateTopBar();
+}
+
+function renderSidebar() {
+  const el = document.getElementById('sidebar');
+  const getChg = (s) => { const t = appState.tickers.find(x=>x.symbol===s); return t ? pct(t.change24h) : '—'; };
+  const getColor = (s) => { const t = appState.tickers.find(x=>x.symbol===s); return t && t.change24h >= 0 ? 'text-green' : 'text-red'; };
+  
+  el.innerHTML = `
+    <div class="brand"><div class="brand-logo">N</div><div><div class="brand-name">NAZ CAPITAL</div><div class="brand-sub">Market Scanner</div></div></div>
+    <div class="nav-section">Scanner</div>
+    <div class="nav-item ${uiState.page==='scanner'?'active':''}" onclick="setPage('scanner')"><span>⌁</span><span>Scanner</span></div>
+    <div class="nav-item ${uiState.page==='watchlist'?'active':''}" onclick="setPage('watchlist')"><span>★</span><span>My Watchlist</span><span class="badge">${uiState.watchlist.length}</span></div>
+    <div class="nav-section">Majors</div>
+    <div class="nav-item" onclick="openCoin('BTCUSDT','BYBIT')"><span>₿</span><span>Bitcoin</span><span class="badge ${getColor('BTCUSDT')}">${getChg('BTCUSDT')}</span></div>
+    <div class="nav-item" onclick="openCoin('ETHUSDT','BYBIT')"><span>Ξ</span><span>Ethereum</span><span class="badge ${getColor('ETHUSDT')}">${getChg('ETHUSDT')}</span></div>
+    <div class="nav-item" onclick="openCoin('SOLUSDT','BYBIT')"><span>S</span><span>Solana</span><span class="badge ${getColor('SOLUSDT')}">${getChg('SOLUSDT')}</span></div>
+    <div class="nav-section">Commodities</div>
+    ${appState.commodities.map(c=>`<div class="nav-item" onclick="openCoin('${c.symbol}','${c.exchange}')"><span>◆</span><span>${c.symbol.replace('USDT','')}</span><span class="badge ${c.change>=0?'text-green':'text-red'}">${pct(c.change)}</span></div>`).join('')}
+    <div class="nav-section">Alts — Bullish</div>
+    ${appState.alts.bull.map(c=>`<div class="nav-item" onclick="openCoin('${c.symbol}','${c.exchange}')"><span>▲</span><span>${c.symbol.replace('USDT','')}</span><span class="badge text-green">${pct(c.chg)}</span></div>`).join('')}
+    <div class="nav-section">Alts — Bearish</div>
+    ${appState.alts.bear.map(c=>`<div class="nav-item" onclick="openCoin('${c.symbol}','${c.exchange}')"><span>▼</span><span>${c.symbol.replace('USDT','')}</span><span class="badge text-red">${pct(c.chg)}</span></div>`).join('')}
+  `;
+}
+
+function renderKPIs() {
+  const el = document.getElementById('kpi-row');
+  const counts = { magic: appState.rows.magic.length, retest: appState.rows.retest.length, oversold: appState.rows.oversold.length };
+  const timeStr = appState.lastScan ? new Date(appState.lastScan).toLocaleTimeString() : '—';
+  
+  el.innerHTML = `
+    <div class="kpi-card"><div class="kpi-label">Crypto USDT Perps</div><div class="kpi-value">${appState.scanStats.coins}</div><div class="kpi-sub">Bybit + Binance scanned</div></div>
+    <div class="kpi-card"><div class="kpi-label">Approaching RSI 52</div><div class="kpi-value">${counts.retest}</div><div class="kpi-sub">retest candidates</div></div>
+    <div class="kpi-card"><div class="kpi-label">Oversold coins</div><div class="kpi-value">${counts.oversold}</div><div class="kpi-sub">2+ TFs: ${calcConfluence()}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Last scan</div><div class="kpi-value">${timeStr}</div><div class="kpi-sub">Next in ${appState.nextScanTs ? Math.max(0, Math.round((appState.nextScanTs - Date.now())/1000)) : '—'}s</div></div>
+    <div class="kpi-card"><div class="kpi-label">Scan progress</div><div class="kpi-value">${appState.progress}%</div><div class="kpi-sub">${appState.scanStats.calls} kline calls</div><div class="progress-bar"><div class="progress-fill" style="width:${appState.progress}%"></div></div></div>
+  `;
+}
+
+function renderTabs() {
+  const el = document.getElementById('tab-bar');
+  el.innerHTML = TABS.map(([k,l])=>`<div class="tab ${uiState.tab===k?'active':''}" onclick="setTab('${k}')">${l}<span class="count">${appState.rows[k].length}</span></div>`).join('');
+  
+  const tfEl = document.getElementById('tf-chips');
+  tfEl.innerHTML = TFS.map(tf=>`<span class="chip ${uiState.tfFilter.includes(tf)?'active':''}" onclick="toggleTF('${tf}')">${tf}</span>`).join('');
+}
+
+function renderTable() {
+  const head = document.getElementById('table-head');
+  const body = document.getElementById('table-body');
+  const empty = document.getElementById('empty-state');
+  const wrap = document.getElementById('table-wrap');
+  const scrollPos = wrap.scrollTop;
+  
+  let rows = [...appState.rows[uiState.tab]];
+  if (uiState.search) rows = rows.filter(r => (r.symbol||r.sym||'').toLowerCase().includes(uiState.search.toLowerCase()));
+  if (uiState.minVol > 0) rows = rows.filter(r => (r.vol||0) >= uiState.minVol);
+  if (uiState.maxRank < 1500) rows = rows.filter(r => r.rank != null && r.rank <= uiState.maxRank);
+  if (uiState.tfFilter.length) rows = rows.filter(r => uiState.tfFilter.includes(r.tf));
+  
+  if (uiState.sort.key) {
+    rows.sort((a,b) => { const va=a[uiState.sort.key], vb=b[uiState.sort.key]; return (va>vb?1:va<vb?-1:0)*uiState.sort.dir; });
+  }
+
+  const th = (k,l) => `<th onclick="setSort('${k}')">${l}${uiState.sort.key===k?(uiState.sort.dir===1?' ▲':' ▼'):''}</th>`;
+
+  if (uiState.tab === 'magic') head.innerHTML = `<tr>${th('symbol','Symbol')}${th('tf','TF')}${th('grade','Grade')}${th('bot','Entry')}${th('live','Live')}${th('dist','Dist%')}${th('note','Note')}${th('vol','Vol24h')}</tr>`;
+  else if (uiState.tab === 'oversold') head.innerHTML = `<tr>${th('symbol','Symbol')}${th('tf','TF')}${th('r','RSI')}${th('tier','Tier')}${th('r','Dist. 50')}${th('vol','Vol24h')}</tr>`;
+  else if (uiState.tab === 'retest') head.innerHTML = `<tr>${th('symbol','Symbol')}${th('tf','TF')}${th('rsi','RSI')}${th('stage','Stage')}${th('bars','Bars>70')}${th('vol','Vol24h')}</tr>`;
+  else if (uiState.tab === 'funding') head.innerHTML = `<tr>${th('symbol','Symbol')}${th('rate','Rate')}${th('next','Next')}${th('mark','Mark')}${th('vol','Vol24h')}</tr>`;
+  else if (uiState.tab === 'magicrec') head.innerHTML = `<tr><th>Symbol</th><th>TF</th><th>TP</th><th>Max Drop</th><th>Status</th></tr>`;
+
+  if (!rows.length) {
+    empty.style.display = 'flex';
+    body.innerHTML = '';
+  } else {
+    empty.style.display = 'none';
+    body.innerHTML = rows.map(r => {
+      const sym = r.symbol || r.sym;
+      if (uiState.tab === 'magic') return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')"><td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td><td>${r.tf}</td><td><span class="tag ${r.grade==='A'?'tag-green':'tag-amber'}">${r.grade}</span></td><td>${r.bot?.toFixed(4)}</td><td>${r.live?.toFixed(4)}</td><td class="${r.dist<2?'text-green':''}">${r.dist?.toFixed(2)}%</td><td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${r.note||'—'}</td><td>${fmt(r.vol)}</td></tr>`;
+      if (uiState.tab === 'oversold') return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')"><td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td><td>${r.tf}</td><td class="${r.r<20?'text-green':r.r<25?'text-amber':''}">${r.r?.toFixed(2)}</td><td><span class="tag ${r.tier==='OS3'?'tag-green':r.tier==='OS2'?'tag-amber':'tag-blue'}">${r.tier}</span></td><td>${(r.r-50).toFixed(2)}</td><td>${fmt(r.vol)}</td></tr>`;
+      if (uiState.tab === 'retest') return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')"><td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td><td>${r.tf}</td><td>${r.rsi?.toFixed(2)}</td><td><span class="tag ${r.stage==='Retest Zone'?'tag-green':r.stage==='Alert'?'tag-amber':'tag-blue'}">${r.stage}</span></td><td>${r.bars}</td><td>${fmt(r.vol)}</td></tr>`;
+      if (uiState.tab === 'funding') return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')"><td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td><td class="text-red">${(r.rate*100).toFixed(4)}%</td><td>${r.next?new Date(r.next).toLocaleTimeString():'—'}</td><td>${r.mark?.toFixed(4)}</td><td>${fmt(r.vol)}</td></tr>`;
+      if (uiState.tab === 'magicrec') return `<tr style="cursor:pointer" onclick="openCoin('${r.sym}','BYBIT')"><td><strong>${r.sym}</strong></td><td>${r.tf}</td><td><span class="tag ${r.tp>=3?'tag-green':r.tp>=2?'tag-amber':'tag-blue'}">TP${r.tp}</span></td><td class="text-red">-${r.dd?.toFixed(2)}%</td><td><span class="tag tag-blue">Tracking</span></td></tr>`;
+      return '';
+    }).join('');
+  }
+  wrap.scrollTop = scrollPos;
+}
+
+function updateTopBar() {
+  const txt = document.getElementById('status-text');
+  const btn = document.getElementById('btn-refresh');
+  if (appState.loading) {
+    txt.innerText = 'Scanning ' + appState.scanStats.calls;
+    btn.disabled = true;
+    btn.innerText = 'Scanning…';
+  } else {
+    txt.innerText = 'Live';
+    btn.disabled = false;
+    btn.innerText = 'Refresh now';
+  }
+}
+
+function renderCoinView() {
+  const t = appState.tickers.find(x => x.symbol === uiState.selectedCoin.symbol) || {};
+  document.getElementById('cv-symbol').innerText = uiState.selectedCoin.symbol;
+  document.getElementById('cv-exch').innerText = uiState.selectedCoin.exchange || 'BYBIT';
+  document.getElementById('cv-price').innerText = t.last ? t.last.toFixed(4) : '—';
+  const chg = document.getElementById('cv-change');
+  chg.innerText = pct(t.change24h);
+  chg.className = t.change24h >= 0 ? 'text-green' : 'text-red';
+  document.getElementById('cv-regime').innerText = t.change24h >= 0 ? 'Neutral–bullish' : 'Neutral–bearish';
+  
+  const inWatch = uiState.watchlist.includes(uiState.selectedCoin.symbol);
+  document.getElementById('cv-watch').innerText = inWatch ? '★ Watchlist' : '☆ Watchlist';
+}
+
+// ==========================================
+// ACTIONS
+// ==========================================
+window.setTab = (t) => { uiState.tab = t; renderTabs(); renderTable(); };
+window.setPage = (p) => { uiState.page = p; renderSidebar(); if(p==='watchlist') alert('Watchlist view is coming soon.'); };
+window.setSort = (k) => {
+  if (uiState.sort.key === k) uiState.sort.dir *= -1;
+  else { uiState.sort.key = k; uiState.sort.dir = -1; }
+  renderTable();
+};
+window.toggleTF = (tf) => {
+  const i = uiState.tfFilter.indexOf(tf);
+  if (i > -1) uiState.tfFilter.splice(i, 1); else uiState.tfFilter.push(tf);
+  renderTabs(); renderTable();
+};
+window.toggleTheme = () => {
+  uiState.theme = uiState.theme === 'dark' ? 'light' : 'dark';
+  document.body.setAttribute('data-theme', uiState.theme);
+  document.getElementById('theme-btn').innerText = uiState.theme === 'dark' ? '☀︎' : '☾';
+  localStorage.setItem('theme', uiState.theme);
+};
+window.openCoin = (sym, exch) => {
+  uiState.selectedCoin = { symbol: sym, exchange: exch };
+  document.getElementById('scanner-view').style.display = 'none';
+  document.getElementById('coin-view').style.display = 'block';
+  
+  const ref = document.getElementById('tv-chart');
+  ref.innerHTML = '';
+  const s = document.createElement('script');
+  s.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+  s.async = true;
+  s.innerHTML = JSON.stringify({
+    autosize: true, symbol: `${exch}:${sym}.P`, interval: '60', timezone: 'Etc/UTC',
+    theme: uiState.theme, style: '1', locale: 'en', enable_publishing: false, allow_symbol_change: false,
+    studies: ['STD;RSI'], hide_side_toolbar: true, withdateranges: true, details: false
+  });
+  ref.appendChild(s);
+  renderCoinView();
+};
+window.closeCoinView = () => {
+  uiState.selectedCoin = null;
+  document.getElementById('coin-view').style.display = 'none';
+  document.getElementById('scanner-view').style.display = 'flex';
+  updateUI();
+};
+window.toggleWatchList = () => {
+  const sym = uiState.selectedCoin.symbol;
+  const i = uiState.watchlist.indexOf(sym);
+  if (i > -1) uiState.watchlist.splice(i, 1); else uiState.watchlist.push(sym);
+  localStorage.setItem('nazWatch', JSON.stringify(uiState.watchlist));
+  renderCoinView(); renderSidebar();
+};
+window.triggerScan = triggerScan;
+
+function calcConfluence() {
+  const m = {};
+  appState.rows.oversold.forEach(r => m[r.symbol] = (m[r.symbol] || 0) + 1);
+  return Object.values(m).filter(v => v >= 2).length;
+}
+
+window.exportCSV = () => {
+  const rows = appState.rows[uiState.tab];
+  if (!rows || !rows.length) return;
+  const keys = Object.keys(rows[0]).filter(k => typeof rows[0][k] !== 'object');
+  const csv = [keys.join(','), ...rows.map(r => keys.map(k => JSON.stringify(r[k] ?? '')).join(','))].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `naz_${uiState.tab}_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+};
+
+// ==========================================
+// INITIALIZATION & EVENT LISTENERS
+// ==========================================
+document.addEventListener('DOMContentLoaded', () => {
+  document.body.setAttribute('data-theme', uiState.theme);
+  document.getElementById('theme-btn').innerText = uiState.theme === 'dark' ? '☀︎' : '☾';
+  
+  document.getElementById('filter-search').addEventListener('input', (e) => { uiState.search = e.target.value; renderTable(); });
+  document.getElementById('filter-vol').addEventListener('change', (e) => { uiState.minVol = parseInt(e.target.value); renderTable(); });
+  document.getElementById('filter-rank').addEventListener('change', (e) => { uiState.maxRank = parseInt(e.target.value); renderTable(); });
+  
+  document.getElementById('filter-search').value = uiState.search;
+  document.getElementById('filter-vol').value = uiState.minVol;
+  document.getElementById('filter-rank').value = uiState.maxRank;
+
+  // Polling countdown
+  setInterval(() => {
+    if (appState.nextScanTs && !appState.loading) {
+      const left = Math.max(0, Math.round((appState.nextScanTs - Date.now())/1000));
+      const kpi = document.querySelectorAll('.kpi-card')[3];
+      if (kpi) kpi.querySelector('.kpi-sub').innerText = `Next in ${left}s`;
+    }
+  }, 1000);
+
+  fetchData();
+});
+</script>
+</body>
+</html>
