@@ -28,7 +28,7 @@ CONCURRENCY = 10
 SCAN_INTERVAL_SEC = 180
 MAX_SYMBOLS = 2000
 MIN_VOL = 1000000
-MAGIC_MIN_VOL = 5000000
+MAGIC_MIN_VOL = 1000000
 
 TF_BYBIT = {'3m':'3','5m':'5','15m':'15','30m':'30','1H':'60','2H':'120','4H':'240','6H':'360','12H':'720','1D':'D','1W':'W'}
 TF_BINANCE = {'3m':'3m','5m':'5m','15m':'15m','30m':'30m','1H':'1h','2H':'2h','4H':'4h','6H':'6h','12H':'12h','1D':'1d','1W':'1w'}
@@ -394,11 +394,15 @@ def detect_magic(candles, tf, conf_candles):
         dist = below_bot_pct if current_close < bot else abs(current_close - top) / top * 100
 
         out.append({
-            't': candles[i]['ts'], 'cf': candles[min(i + req - 1, n - 1)]['ts'],
+            't': candles[i]['ts'], 
+            'cf': candles[min(i + req - 1, n - 1)]['ts'],
             'pt': pt, 'top': top, 'bot': bot, 'bp': bp, 'mn': mn,
             'g': grade, 'grade': grade, 'tt': None, 'bk': None, 'r': None,
             'dp': round(dp, 2), 'vr': round(vr, 2), 'dist': round(dist, 2),
-            'live': live, 'drop': round(dp, 2), 'spike': round(vr, 2), 'note': ''
+            'live': live, 'drop': round(dp, 2), 'spike': round(vr, 2), 'note': '',
+            'rsi_now': round(rsi[-1], 2) if rsi[-1] else 0,  # Live RSI of the chart
+            'rsi_conf': round(rsi[i], 2),                     # RSI at the breakdown
+            'change24h': candles[-1]['close'] > candles[0]['close'] and 0 or 0 # fallback
         })
     return out[-1:]
 
@@ -514,8 +518,13 @@ def run_scan():
                     conf = klines.get(CONF_TF.get(tf))
                     ms = detect_magic(klines[tf], tf, conf)
                     for m in ms:
+                        # Check if this zone was retested in our tracked database
+                        tracked_match = next((z for z in TRACKED_ZONES if z['sym'] == inst['symbol'] and z['tf'] == tf and z['t'] == m['t']), None)
+                        if tracked_match and tracked_match.get('retested'):
+                            m['tt'] = tracked_match.get('ts') # Show retest timestamp
+                            
                         magic.append({**inst, 'tf': tf, **m})
-                        if not any(z['sym'] == inst['symbol'] and z['tf'] == tf and z['t'] == m['t'] for z in TRACKED_ZONES):
+                        if not tracked_match:
                             TRACKED_ZONES.append({'sym': inst['symbol'], 'tf': tf, 'top': m['top'], 'bot': m['bot'], 't': m['t'], 'ts': int(time.time()*1000), 'tp': 0, 'dd': 0, 'done': False})
 
             for tf in OVERSOLD_TFS:
