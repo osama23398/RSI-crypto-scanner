@@ -293,8 +293,8 @@ function renderTable() {
 
   const th = (k,l) => `<th onclick="setSort('${k}')">${l}${uiState.sort.key===k?(uiState.sort.dir===1?' ▲':' ▼'):''}</th>`;
 
-     if (uiState.tab === 'magic') head.innerHTML = `<tr>
-    ${th('symbol','Symbol')}${th('tf','TF')}${th('bot','Short Zone (Last High)')}
+     i  if (uiState.tab === 'magic') head.innerHTML = `<tr>
+    ${th('rank','Rank')}${th('symbol','Symbol')}${th('tf','TF')}${th('bot','Short Zone (Last High)')}
     ${th('live','Live Price')}${th('mn','Lowest RSI')}${th('rsi_now','RSI Now (Zone TF)')}
     ${th('cf','RSI 30 Broken')}${th('tt','Retested At')}${th('change24h','24H %')}${th('vol','24H Volume')}
   </tr>`;
@@ -321,6 +321,7 @@ function renderTable() {
         };
         
         return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')">
+          <td>${r.rank ? '#' + r.rank : '—'}</td>
           <td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td>
           <td><span class="tag" style="background:var(--hover); border:1px solid var(--border); font-size:10px;">${r.tf}</span></td>
           <td style="color:#5b9cff; font-weight:600;">${r.bot?.toFixed(4)} - ${r.top?.toFixed(4)}</td>
