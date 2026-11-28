@@ -228,6 +228,13 @@ function updateUI() {
   renderTable();
   updateTopBar();
 }
+  function renderTabs() {
+  const el = document.getElementById('tab-bar');
+  el.innerHTML = TABS.map(([k,l])=>`<div class="tab ${uiState.tab===k?'active':''}" onclick="setTab('${k}')">${l}<span class="count">${appState.rows[k].length}</span></div>`).join('');
+  
+  const tfEl = document.getElementById('tf-chips');
+  tfEl.innerHTML = TFS.map(tf=>`<span class="chip ${uiState.tfFilter.includes(tf)?'active':''}" onclick="toggleTF('${tf}')">${tf}</span>`).join('');
+}
 
 function renderSidebar() {
   const el = document.getElementById('sidebar');
