@@ -323,7 +323,7 @@ def detect_magic(candles, tf, conf_candles):
     n = len(candles)
     req = 3 if tf in ['15m', '1H'] else 2
     if n < MAGIC_LOOKBACK + req + 5: return []
-
+    
     period = 14
     closes = [c['close'] for c in candles]
     rsi_raw = rsi_series(closes, period)
@@ -341,10 +341,12 @@ def detect_magic(candles, tf, conf_candles):
     start_idx = max(period + 1, MAGIC_LOOKBACK)
 
     for i in range(start_idx, n):
+        # 1. Breakdown bar: fresh cross + red candle
         if rsi[i] is None or rsi[i] >= MAGIC_RSI_LEVEL: continue
         if i > 0 and rsi[i-1] is not None and rsi[i-1] < MAGIC_RSI_LEVEL: continue
         if candles[i]['close'] >= candles[i]['open']: continue
 
+        # 2. Run gate (3 bars for 15m/1H, 2 for others)
         run_ok, mn = True, float('inf')
         for j in range(i, i + req):
             if j >= n or rsi[j] is None or rsi[j] >= MAGIC_RSI_LEVEL:
@@ -352,17 +354,31 @@ def detect_magic(candles, tf, conf_candles):
             if rsi[j] < mn: mn = rsi[j]
         if not run_ok: continue
 
-        prev = candles[i-1]
-        top, bot, bp = prev['high'], prev['low'], candles[i]['close']
-        if top <= bot: continue
-
+        # 3. FIND THE SHORT ZONE (LAST HIGH) 
+        # Look back 20 bars before the breakdown to find the highest peak
         peak_high, peak_idx = -float('inf'), i - 1
-        lb0 = max(0, i - MAGIC_LOOKBACK)
-        for k in range(lb0, i):
+        lb_start = max(0, i - 20) 
+        for k in range(lb_start, i):
             if candles[k]['high'] > peak_high:
-                peak_high = candles[k]['high']; peak_idx = k
+                peak_high = candles[k]['high']
+                peak_idx = k
+        
+        peak_candle = candles[peak_idx]
+        top = peak_candle['high']
+        bot = peak_candle['low']
+
+        # Fallback: If the peak candle was red, find nearest prior bullish candle for the bot
+        if peak_candle['close'] <= peak_candle['open']:
+            for k in range(peak_idx, max(0, peak_idx - 4), -1):
+                if candles[k]['close'] > candles[k]['open']:
+                    bot = candles[k]['low']
+                    break
+                    
+        if top <= bot: continue
+        bp = candles[i]['close']
         pt = candles[peak_idx]['ts']
 
+        # 4. Confirmation on higher timeframe
         confirmed = False
         if conf_closed:
             count = 0
@@ -376,6 +392,7 @@ def detect_magic(candles, tf, conf_candles):
                 else: count = 0
         if not confirmed: continue
 
+        # 5. Grade (A or B based on higher TF)
         grade = 'B'
         if conf_closed:
             best_j = -1
@@ -385,12 +402,14 @@ def detect_magic(candles, tf, conf_candles):
             if best_j >= period and conf_rsi[best_j - period] is not None and conf_rsi[best_j - period] < MAGIC_RSI_LEVEL:
                 grade = 'A'
 
+        # 6. Diagnostics
         dp = ((peak_high - bp) / peak_high) * 100 if peak_high > 0 else 0
         v3, c3, v20, c20 = 0, 0, 0, 0
         for k in range(i, min(i + 3, n)): v3 += candles[k]['volume']; c3 += 1
         for k in range(max(0, i - 20), i): v20 += candles[k]['volume']; c20 += 1
         vr = (v3 / c3) / (v20 / c20) if c3 > 0 and c20 > 0 and v20 > 0 else 0
 
+        # 7. Safety Filters (Invalidate if price went back up, or dropped >5% past the zone)
         if current_close > top: continue
         below_bot_pct = ((bot - current_close) / bot * 100) if current_close < bot else 0
         if below_bot_pct > 5: continue
@@ -398,15 +417,13 @@ def detect_magic(candles, tf, conf_candles):
         dist = below_bot_pct if current_close < bot else abs(current_close - top) / top * 100
 
         out.append({
-            't': candles[i]['ts'], 
-            'cf': candles[min(i + req - 1, n - 1)]['ts'],
+            't': candles[i]['ts'], 'cf': candles[min(i + req - 1, n - 1)]['ts'],
             'pt': pt, 'top': top, 'bot': bot, 'bp': bp, 'mn': mn,
             'g': grade, 'grade': grade, 'tt': None, 'bk': None, 'r': None,
             'dp': round(dp, 2), 'vr': round(vr, 2), 'dist': round(dist, 2),
             'live': live, 'drop': round(dp, 2), 'spike': round(vr, 2), 'note': '',
-            'rsi_now': round(rsi[-1], 2) if rsi[-1] else 0,  # Live RSI of the chart
-            'rsi_conf': round(rsi[i], 2),                     # RSI at the breakdown
-            'change24h': candles[-1]['close'] > candles[0]['close'] and 0 or 0 # fallback
+            'rsi_now': round(rsi[-1], 2) if rsi[-1] else 0, 
+            'rsi_conf': round(rsi[i], 2)
         })
     return out[-1:]
 
