@@ -293,7 +293,11 @@ function renderTable() {
 
   const th = (k,l) => `<th onclick="setSort('${k}')">${l}${uiState.sort.key===k?(uiState.sort.dir===1?' ▲':' ▼'):''}</th>`;
 
-  if (uiState.tab === 'magic') head.innerHTML = `<tr>${th('symbol','Symbol')}${th('tf','TF')}${th('bot','Short Zone')}${th('live','Live Price')}${th('mn','Lowest RSI')}${th('rsi_now','RSI Now')}${th('cf','Confirmed')}${th('tt','Retested At')}${th('vol','24H Vol')}</tr>`;
+   if (uiState.tab === 'magic') head.innerHTML = `<tr>
+    ${th('symbol','Symbol')}${th('tf','TF')}${th('bot','Short Zone (Last High)')}
+    ${th('live','Live Price')}${th('mn','Lowest RSI')}${th('rsi_now','RSI Now (Zone TF)')}
+    ${th('cf','RSI 30 Broken')}${th('tt','Retested At')}${th('change24h','24H %')}${th('vol','24H Volume')}
+  </tr>`;
   else if (uiState.tab === 'oversold') head.innerHTML = `<tr>${th('symbol','Symbol')}${th('tf','TF')}${th('r','RSI')}${th('tier','Tier')}${th('r','Dist. 50')}${th('vol','Vol24h')}</tr>`;
   else if (uiState.tab === 'retest') head.innerHTML = `<tr>${th('symbol','Symbol')}${th('tf','TF')}${th('rsi','RSI')}${th('stage','Stage')}${th('bars','Bars>70')}${th('vol','Vol24h')}</tr>`;
   else if (uiState.tab === 'funding') head.innerHTML = `<tr>${th('symbol','Symbol')}${th('rate','Rate')}${th('next','Next')}${th('mark','Mark')}${th('vol','Vol24h')}</tr>`;
@@ -306,7 +310,27 @@ function renderTable() {
     empty.style.display = 'none';
     body.innerHTML = rows.map(r => {
       const sym = r.symbol || r.sym;
-     if (uiState.tab === 'magic') return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')"><td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td><td>${r.tf}</td><td>${r.bot?.toFixed(4)} - ${r.top?.toFixed(4)}</td><td>${r.live?.toFixed(4)}</td><td class="text-amber">${r.mn?.toFixed(2)}</td><td class="text-green">${r.rsi_now?.toFixed(2)}</td><td class="text-muted">${r.cf ? new Date(r.cf).toLocaleTimeString() : '—'}</td><td class="text-muted">${r.tt ? new Date(r.tt).toLocaleTimeString() : '—'}</td><td>${fmt(r.vol)}</td></tr>`;      
+       if (uiState.tab === 'magic') {
+        const timeAgo = (ts) => {
+          if (!ts) return '—';
+          const diff = Date.now() - ts;
+          const h = Math.floor(diff / 3600000);
+          const m = Math.floor((diff % 3600000) / 60000);
+          return `${new Date(ts).toLocaleString('en-GB', {day: '2-digit', month: 'short', hour: '2-digit', minute:'2-digit'})} ${h}h ${m}m ago`;
+        };
+        return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')">
+          <td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td>
+          <td>${r.tf}</td>
+          <td>${r.bot?.toFixed(4)} - ${r.top?.toFixed(4)}</td>
+          <td>${r.live?.toFixed(4)}</td>
+          <td class="text-amber">${r.mn?.toFixed(2)}</td>
+          <td class="text-green">${r.rsi_now?.toFixed(2)}</td>
+          <td class="text-muted">${timeAgo(r.cf)}</td>
+          <td class="text-muted">${timeAgo(r.tt)}</td>
+          <td class="${r.change >= 0 ? 'text-green' : 'text-red'}">${r.change >= 0 ? '+' : ''}${r.change?.toFixed(2)}%</td>
+          <td>${fmt(r.vol)}</td>
+        </tr>`;
+      }
       if (uiState.tab === 'oversold') return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')"><td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td><td>${r.tf}</td><td class="${r.r<20?'text-green':r.r<25?'text-amber':''}">${r.r?.toFixed(2)}</td><td><span class="tag ${r.tier==='OS3'?'tag-green':r.tier==='OS2'?'tag-amber':'tag-blue'}">${r.tier}</span></td><td>${(r.r-50).toFixed(2)}</td><td>${fmt(r.vol)}</td></tr>`;
       if (uiState.tab === 'retest') return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')"><td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td><td>${r.tf}</td><td>${r.rsi?.toFixed(2)}</td><td><span class="tag ${r.stage==='Retest Zone'?'tag-green':r.stage==='Alert'?'tag-amber':'tag-blue'}">${r.stage}</span></td><td>${r.bars}</td><td>${fmt(r.vol)}</td></tr>`;
       if (uiState.tab === 'funding') return `<tr style="cursor:pointer" onclick="openCoin('${sym}','${r.exchange}')"><td><strong>${sym}</strong> <span class="tag tag-blue" style="font-size:8px">${r.exchange}</span></td><td class="text-red">${(r.rate*100).toFixed(4)}%</td><td>${r.next?new Date(r.next).toLocaleTimeString():'—'}</td><td>${r.mark?.toFixed(4)}</td><td>${fmt(r.vol)}</td></tr>`;
