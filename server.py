@@ -260,6 +260,7 @@ def resample_45m(c15):
     return [buckets[k] for k in sorted(buckets.keys())]
 
 def get_cg_ranks():
+    # Cache for 6 hours to prevent unnecessary calls
     if os.path.exists(RANKS_FILE) and time.time() - os.path.getmtime(RANKS_FILE) < 21600:
         try:
             with open(RANKS_FILE, 'r') as f: return json.load(f)
@@ -267,13 +268,16 @@ def get_cg_ranks():
     ranks = {}
     try:
         for p in range(1, 7):
-            d = fetch_json(f'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={p}&sparkline=false')
+            url = f'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={p}&sparkline=false'
+            d = fetch_json(url)
             if not d: break
             for c in d: ranks[c['symbol'].upper()] = c['market_cap_rank']
             if len(d) < 250: break
-            time.sleep(1)
+            # Sleep for 3 seconds between pages to guarantee we never hit the rate limit
+            time.sleep(3) 
         with open(RANKS_FILE, 'w') as f: json.dump(ranks, f)
-    except: pass
+    except Exception as e: 
+        print(f"CoinGecko Rank Error: {e}")
     return ranks
 
 def fetch_all_klines(symbol, exchange, tfs):
