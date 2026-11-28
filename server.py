@@ -625,7 +625,11 @@ def startup_event():
     threading.Thread(target=scan_loop, daemon=True).start()
 
 @app.get("/")
-def serve_index(): return FileResponse(os.path.join(BASE_DIR, 'index.html'))
+def serve_index(): 
+    return FileResponse(
+        os.path.join(BASE_DIR, 'index.html'), 
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate, max-age=0"}
+    )
 
 @app.get("/api/data")
 def get_data():
